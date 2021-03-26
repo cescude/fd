@@ -30,10 +30,7 @@ pub fn main() !void {
 
 const Entry = std.fs.Dir.Entry;
 
-fn entryLt(v: void, e0: Entry, e1: Entry) bool {
-    var s0 = e0.name;
-    var s1 = e1.name;
-
+fn strLt(v: void, s0: []const u8, s1: []const u8) bool {
     var idx: usize = 0;
     var top_idx = std.math.min(s0.len, s1.len);
 
@@ -46,6 +43,16 @@ fn entryLt(v: void, e0: Entry, e1: Entry) bool {
     }
 
     return s0.len < s1.len;
+}
+
+fn strGt(v: void, s0: []const u8, s1: []const u8) bool {
+    return !strLt(v, s0, s1);
+}
+
+fn entryLt(v: void, e0: Entry, e1: Entry) bool {
+    var s0 = e0.name;
+    var s1 = e1.name;
+    return strLt(v, s0, s1);
 }
 
 fn entryGt(v: void, e0: Entry, e1: Entry) bool {
@@ -120,7 +127,6 @@ fn Proc(comptime WriterType: type) type {
                 }
 
                 var files_found = std.ArrayList(Entry).init(self.allocator);
-                var paths_found = std.ArrayList(Entry).init(self.allocator);
                 defer {
                     for (files_found.items) |file| {
                         switch (file.kind) {
@@ -129,15 +135,12 @@ fn Proc(comptime WriterType: type) type {
                         }
                     }
                     files_found.deinit();
-
-                    for (paths_found.items) |path| {
-                        switch (path.kind) {
-                            .Directory => paths.append(path.name) catch {},
-                            else => unreachable,
-                        }
-                    }
-                    paths_found.deinit();
                 }
+
+                // Store the size of the paths list; we're going to (reverse)
+                // sort any added paths found in the current directory & want to
+                // only affect those that were newly added...
+                const paths_size = paths.items.len;
 
                 var iterator = dir.iterate();
                 while (try iterator.next()) |p| {
@@ -147,22 +150,22 @@ fn Proc(comptime WriterType: type) type {
                     var joined = try std.fs.path.join(self.allocator, qqq[0..]);
 
                     switch (p.kind) {
-                        .Directory => try paths_found.append(Entry{ .kind = p.kind, .name = joined }),
+                        .Directory => try paths.append(joined),
                         else => try files_found.append(Entry{ .kind = p.kind, .name = joined }),
                     }
                 }
 
+                // Directories are processed from end-of-the-stack first, so
+                // sort them z-a
+                _ = std.sort.sort([]const u8, paths.items[paths_size..], {}, strGt);
+
+                // Files are processed in normal order (a-z)
                 _ = std.sort.sort(Entry, files_found.items, {}, entryLt);
-                _ = std.sort.sort(Entry, paths_found.items, {}, entryGt);
 
                 for (files_found.items) |file| {
                     const str = file.name[root.len + 1 ..];
                     const dname = std.fs.path.dirname(str);
                     const fname = std.fs.path.basename(str);
-
-                    if (file.kind == Entry.Kind.Directory) {
-                        unreachable;
-                    }
 
                     if (dname) |ss| {
                         try self.styled(Style.Prefix, ss);
