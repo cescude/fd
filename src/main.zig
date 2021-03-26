@@ -1,11 +1,17 @@
 const std = @import("std");
-var stdout = std.io.getStdOut().writer();
+var stdout = std.io.getStdOut();
+
+const Config = struct {
+    use_color: bool = true,
+};
 
 pub fn main() !void {
     var buffer: [4096]u8 = undefined;
     var cwd = try std.os.getcwd(buffer[0..]);
 
-    var outs = std.io.bufferedWriter(stdout);
+    const cfg = Config{ .use_color = std.os.isatty(stdout.handle) };
+
+    var outs = std.io.bufferedWriter(stdout.writer());
     defer outs.flush() catch {};
 
     var writer = outs.writer();
@@ -18,7 +24,8 @@ pub fn main() !void {
         else => &gpa.allocator,
     };
 
-    try WithWriter(@TypeOf(writer)).run(allocator, cwd, &writer);
+    var proc = Proc(@TypeOf(writer)).init(allocator, cfg, &writer);
+    try proc.run(cwd);
 }
 
 const Entry = std.fs.Dir.Entry;
@@ -41,24 +48,41 @@ fn entryLt(v: void, e0: Entry, e1: Entry) bool {
     return s0.len < s1.len;
 }
 
-fn WithWriter(comptime WriterType: type) type {
+fn Proc(comptime WriterType: type) type {
     return struct {
-        pub fn printPath(writer: *WriterType, path: []const u8) !void {
-            try writer.print("\u{001b}[1m{s}{s}\u{001b}[0m", .{ path, std.fs.path.sep_str });
-            // try writer.print("{s}{s}{s}", .{ prefix, path, std.fs.path.sep_str });
+        allocator: *std.mem.Allocator,
+        cfg: Config,
+        writer: *WriterType,
+
+        const Self = @This();
+
+        pub fn init(allocator: *std.mem.Allocator, cfg: Config, writer: *WriterType) Self {
+            return .{
+                .allocator = allocator,
+                .cfg = cfg,
+                .writer = writer,
+            };
         }
 
-        pub fn run(allocator: *std.mem.Allocator, root: []u8, writer: *WriterType) !void {
-            var paths = std.ArrayList([]const u8).init(allocator);
+        pub fn printPath(self: *Self, path: []const u8) !void {
+            if (self.cfg.use_color) {
+                try self.writer.print("\u{001b}[1m{s}{s}\u{001b}[0m", .{ path, std.fs.path.sep_str });
+            } else {
+                try self.writer.print("{s}{s}", .{ path, std.fs.path.sep_str });
+            }
+        }
+
+        pub fn run(self: *Self, root: []u8) !void {
+            var paths = std.ArrayList([]const u8).init(self.allocator);
             defer {
                 for (paths.items) |p| unreachable; //allocator.free(p);
                 paths.deinit();
             }
 
-            try paths.append(try allocator.dupe(u8, root));
+            try paths.append(try self.allocator.dupe(u8, root));
             while (paths.items.len > 0) {
                 var cur_path = paths.pop();
-                defer allocator.free(cur_path);
+                defer self.allocator.free(cur_path);
 
                 var dir = try std.fs.openDirAbsolute(cur_path, .{
                     .iterate = true,
@@ -71,17 +95,17 @@ fn WithWriter(comptime WriterType: type) type {
                     const dname = std.fs.path.dirname(str);
                     const fname = std.fs.path.basename(str);
                     if (dname) |ss| {
-                        try printPath(writer, ss);
+                        try self.printPath(ss);
                     }
-                    try writer.print("{s}\n", .{fname});
+                    try self.writer.print("{s}\n", .{fname});
                 }
 
-                var entries = std.ArrayList(Entry).init(allocator);
+                var entries = std.ArrayList(Entry).init(self.allocator);
                 defer {
                     for (entries.items) |entry| {
                         switch (entry.kind) {
                             .Directory => paths.insert(0, entry.name) catch {},
-                            else => allocator.free(entry.name),
+                            else => self.allocator.free(entry.name),
                         }
                     }
                     entries.deinit();
@@ -92,7 +116,7 @@ fn WithWriter(comptime WriterType: type) type {
                     if (p.name[0] == '.') continue;
 
                     var qqq = [_][]const u8{ cur_path, p.name };
-                    var joined = try std.fs.path.join(allocator, qqq[0..]);
+                    var joined = try std.fs.path.join(self.allocator, qqq[0..]);
 
                     try entries.append(Entry{ .kind = p.kind, .name = joined });
                 }
@@ -109,19 +133,19 @@ fn WithWriter(comptime WriterType: type) type {
                     }
 
                     if (dname) |ss| {
-                        try printPath(writer, ss);
+                        try self.printPath(ss);
                     }
 
                     switch (entry.kind) {
                         .Directory => continue,
                         .File => {
-                            try writer.print("{s}\n", .{fname});
+                            try self.writer.print("{s}\n", .{fname});
                         },
                         .SymLink => {
-                            try writer.print("{s}\n", .{fname});
+                            try self.writer.print("{s}\n", .{fname});
                         },
                         else => {
-                            try writer.print("{s} ({s})\n", .{ fname, entry.kind });
+                            try self.writer.print("{s} ({s})\n", .{ fname, entry.kind });
                         },
                     }
                 }
