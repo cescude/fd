@@ -64,11 +64,26 @@ fn Proc(comptime WriterType: type) type {
             };
         }
 
-        pub fn printPath(self: *Self, path: []const u8) !void {
+        const Style = enum {
+            Prefix,
+            Default,
+            SymLink,
+            Unknown,
+        };
+
+        pub fn styled(self: *Self, comptime style: Style, str: []const u8) !void {
+            const sep = std.fs.path.sep_str;
             if (self.cfg.use_color) {
-                try self.writer.print("\u{001b}[1m{s}{s}\u{001b}[0m", .{ path, std.fs.path.sep_str });
+                switch (style) {
+                    .Prefix => try self.writer.print("\u{001b}[1m{s}{s}\u{001b}[0m", .{ str, sep }),
+                    .Default, .Unknown => try self.writer.print("{s}\n", .{str}),
+                    .SymLink => try self.writer.print("\u{001b}[31;1m\u{001b}[7m{s}\u{001b}[0m\n", .{str}),
+                }
             } else {
-                try self.writer.print("{s}{s}", .{ path, std.fs.path.sep_str });
+                switch (style) {
+                    .Prefix => try self.writer.print("{s}{s}", .{ str, sep }),
+                    else => try self.writer.print("{s}\n", .{str}),
+                }
             }
         }
 
@@ -95,16 +110,16 @@ fn Proc(comptime WriterType: type) type {
                     const dname = std.fs.path.dirname(str);
                     const fname = std.fs.path.basename(str);
                     if (dname) |ss| {
-                        try self.printPath(ss);
+                        try self.styled(Style.Prefix, ss);
                     }
-                    try self.writer.print("{s}\n", .{fname});
+                    try self.styled(Style.Default, fname);
                 }
 
                 var entries = std.ArrayList(Entry).init(self.allocator);
                 defer {
                     for (entries.items) |entry| {
                         switch (entry.kind) {
-                            .Directory => paths.insert(0, entry.name) catch {},
+                            .Directory => paths.append(entry.name) catch {},
                             else => self.allocator.free(entry.name),
                         }
                     }
@@ -133,19 +148,19 @@ fn Proc(comptime WriterType: type) type {
                     }
 
                     if (dname) |ss| {
-                        try self.printPath(ss);
+                        try self.styled(Style.Prefix, ss);
                     }
 
                     switch (entry.kind) {
                         .Directory => continue,
                         .File => {
-                            try self.writer.print("{s}\n", .{fname});
+                            try self.styled(Style.Default, fname);
                         },
                         .SymLink => {
-                            try self.writer.print("{s}\n", .{fname});
+                            try self.styled(Style.SymLink, fname);
                         },
                         else => {
-                            try self.writer.print("{s} ({s})\n", .{ fname, entry.kind });
+                            try self.styled(Style.Unknown, fname);
                         },
                     }
                 }
