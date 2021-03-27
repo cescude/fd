@@ -1,6 +1,8 @@
 const std = @import("std");
 var stdout = std.io.getStdOut();
 
+const sep = std.fs.path.sep_str;
+
 const Config = struct {
     use_color: bool = true,
 };
@@ -32,9 +34,9 @@ const Entry = std.fs.Dir.Entry;
 
 fn strLt(v: void, s0: []const u8, s1: []const u8) bool {
     var idx: usize = 0;
-    var top_idx = std.math.min(s0.len, s1.len);
+    var top = std.math.min(s0.len, s1.len);
 
-    while (idx < top_idx) : (idx += 1) {
+    while (idx < top) : (idx += 1) {
         if (s0[idx] == s1[idx]) {
             continue;
         }
@@ -46,17 +48,42 @@ fn strLt(v: void, s0: []const u8, s1: []const u8) bool {
 }
 
 fn strGt(v: void, s0: []const u8, s1: []const u8) bool {
-    return !strLt(v, s0, s1);
+    var idx: usize = 0;
+    var top = std.math.min(s0.len, s1.len);
+
+    while (idx < top) : (idx += 1) {
+        if (s0[idx] == s1[idx]) {
+            continue;
+        }
+
+        return s0[idx] > s1[idx];
+    }
+
+    return s0.len > s1.len;
 }
 
 fn entryLt(v: void, e0: Entry, e1: Entry) bool {
-    var s0 = e0.name;
-    var s1 = e1.name;
-    return strLt(v, s0, s1);
+    return strLt(v, e0.name, e1.name);
 }
 
 fn entryGt(v: void, e0: Entry, e1: Entry) bool {
-    return !entryLt(v, e0, e1);
+    return strGt(v, e0.name, e1.name);
+}
+
+test "Sorting functions don't crash on >1024 items" {
+    var items: [1024][]const u8 = undefined;
+    for (items) |_, idx| {
+        items[idx] = try std.fmt.allocPrint(std.testing.allocator, "{d}", .{idx});
+    }
+    defer for (items) |i| {
+        std.testing.allocator.free(i);
+    };
+
+    // Had a bad implementation of strGt (`sort` crashes if gte instead of gt),
+    // make sure that doesn't slip up again.
+
+    _ = std.sort.sort([]const u8, items[0..], {}, strLt);
+    _ = std.sort.sort([]const u8, items[0..], {}, strGt);
 }
 
 fn Proc(comptime WriterType: type) type {
@@ -79,29 +106,40 @@ fn Proc(comptime WriterType: type) type {
             Prefix,
             Default,
             SymLink,
+            AccessDenied,
             Unknown,
         };
 
-        pub fn styled(self: *Self, comptime style: Style, str: []const u8) !void {
-            const sep = std.fs.path.sep_str;
+        pub fn styled(self: *Self, comptime style: Style, str: []const u8, comptime suffix: []const u8) !void {
             if (self.cfg.use_color) {
                 switch (style) {
-                    .Prefix => try self.writer.print("\u{001b}[1m{s}{s}\u{001b}[0m", .{ str, sep }),
-                    .Default, .Unknown => try self.writer.print("{s}\n", .{str}),
-                    .SymLink => try self.writer.print("\u{001b}[31;1m\u{001b}[7m{s}\u{001b}[0m\n", .{str}),
+                    .Prefix => try self.writer.print("\u{001b}[1m{s}{s}\u{001b}[0m", .{ str, suffix }),
+                    .Default, .Unknown => try self.writer.print("{s}{s}", .{ str, suffix }),
+                    .SymLink => try self.writer.print("\u{001b}[31;1m\u{001b}[7m{s}\u{001b}[0m{s}", .{ str, suffix }),
+                    .AccessDenied => try self.writer.print("\u{001b}[41;1m\u{001b}[37;1m{s}\u{001b}[0m{s}", .{ str, suffix }),
                 }
             } else {
                 switch (style) {
-                    .Prefix => try self.writer.print("{s}{s}", .{ str, sep }),
-                    else => try self.writer.print("{s}\n", .{str}),
+                    .Prefix => try self.writer.print("{s}{s}", .{ str, suffix }),
+                    else => try self.writer.print("{s}{s}", .{ str, suffix }),
                 }
             }
         }
 
-        pub fn run(self: *Self, root: []u8) !void {
+        // Strip the `root` prefix from `path`
+        pub fn dropRoot(root: []const u8, path: []const u8) []const u8 {
+            // Let's assume sep is always a single character...
+            if (root[root.len - 1] == sep[0]) {
+                return path[root.len..];
+            } else {
+                return path[root.len + 1 ..];
+            }
+        }
+
+        pub fn run(self: *Self, root: []const u8) !void {
             var paths = std.ArrayList([]const u8).init(self.allocator);
             defer {
-                for (paths.items) |p| unreachable; //allocator.free(p);
+                for (paths.items) |p| self.allocator.free(p);
                 paths.deinit();
             }
 
@@ -110,20 +148,22 @@ fn Proc(comptime WriterType: type) type {
                 var cur_path = paths.pop();
                 defer self.allocator.free(cur_path);
 
-                var dir = try std.fs.openDirAbsolute(cur_path, .{
+                var dir = std.fs.openDirAbsolute(cur_path, .{
                     .iterate = true,
                     .no_follow = true,
-                });
+                }) catch |err| {
+                    switch (err) {
+                        error.AccessDenied => {
+                            try self.styled(Style.AccessDenied, dropRoot(root, cur_path), "\n");
+                            continue;
+                        },
+                        else => return err,
+                    }
+                };
                 defer dir.close();
 
                 if (paths.items.len > 0) {
-                    const str = cur_path[root.len + 1 ..];
-                    const dname = std.fs.path.dirname(str);
-                    const fname = std.fs.path.basename(str);
-                    if (dname) |ss| {
-                        try self.styled(Style.Prefix, ss);
-                    }
-                    try self.styled(Style.Default, fname);
+                    try self.styled(Style.Prefix, dropRoot(root, cur_path), "\n");
                 }
 
                 var files_found = std.ArrayList(Entry).init(self.allocator);
@@ -155,32 +195,31 @@ fn Proc(comptime WriterType: type) type {
                     }
                 }
 
-                // Directories are processed from end-of-the-stack first, so
-                // sort them z-a
+                // Sort paths z-a (since we pluck them off back-to-front, above)
                 _ = std.sort.sort([]const u8, paths.items[paths_size..], {}, strGt);
 
-                // Files are processed in normal order (a-z)
+                // Sort files a-z (since we iterate over them normally, below)
                 _ = std.sort.sort(Entry, files_found.items, {}, entryLt);
 
                 for (files_found.items) |file| {
-                    const str = file.name[root.len + 1 ..];
+                    const str = dropRoot(root, file.name);
                     const dname = std.fs.path.dirname(str);
                     const fname = std.fs.path.basename(str);
 
                     if (dname) |ss| {
-                        try self.styled(Style.Prefix, ss);
+                        try self.styled(Style.Prefix, ss, sep);
                     }
 
                     switch (file.kind) {
                         .Directory => unreachable,
                         .File => {
-                            try self.styled(Style.Default, fname);
+                            try self.styled(Style.Default, fname, "\n");
                         },
                         .SymLink => {
-                            try self.styled(Style.SymLink, fname);
+                            try self.styled(Style.SymLink, fname, "\n");
                         },
                         else => {
-                            try self.styled(Style.Unknown, fname);
+                            try self.styled(Style.Unknown, fname, "\n");
                         },
                     }
                 }
