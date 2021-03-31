@@ -24,8 +24,8 @@ const Args = struct {
         short_name: ?u8,
         description: []const u8,
         val_ptr: union(enum) {
-            Bool: *bool,
-            Str: *[]const u8,
+            Flag: *?bool,
+            Value: *?[]const u8,
         },
     };
 
@@ -52,21 +52,21 @@ const Args = struct {
         self.args.deinit();
     }
 
-    pub fn boolean(self: *Self, long: ?[]const u8, short: ?u8, ptr: *bool, desc: []const u8) !void {
+    pub fn flag(self: *Self, long: ?[]const u8, short: ?u8, ptr: *?bool, desc: []const u8) !void {
         try self.args.append(Arg{
             .long_name = long,
             .short_name = short,
             .description = desc,
-            .val_ptr = .{ .Bool = ptr },
+            .val_ptr = .{ .Flag = ptr },
         });
     }
 
-    pub fn string(self: *Self, long: ?[]const u8, short: ?u8, ptr: *[]const u8, desc: []const u8) !void {
+    pub fn option(self: *Self, long: ?[]const u8, short: ?u8, ptr: *?[]const u8, desc: []const u8) !void {
         try self.args.append(Arg{
             .long_name = long,
             .short_name = short,
             .description = desc,
-            .val_ptr = .{ .Str = ptr },
+            .val_ptr = .{ .Value = ptr },
         });
     }
 
@@ -79,6 +79,11 @@ const Args = struct {
         defer std.process.argsFree(self.allocator, argv);
         try process(argv);
     }
+
+    const Action = enum {
+        Continue,
+        ConsumedToken,
+    };
 
     pub fn process(self: *Self, argv: [][]const u8) !void {
         var no_more_flags = false;
@@ -93,7 +98,11 @@ const Args = struct {
                 if (std.mem.eql(u8, token, "--")) {
                     no_more_flags = true;
                 } else if (std.mem.startsWith(u8, token, "--")) {
-                    try self.fillLongValue(token[2..], argv[idx + 1 ..]);
+                    const action = try self.fillLongValue(token[2..], argv[idx + 1 ..]);
+                    switch (action) {
+                        .Continue => {},
+                        .ConsumedToken => idx += 1, // we used argv[idx+1] for the value
+                    }
                 } else if (std.mem.startsWith(u8, token, "-")) {
                     std.debug.print("Short opt {s}\n", .{token});
                 } else {
@@ -111,10 +120,16 @@ const Args = struct {
         }
     }
 
-    fn extractValue(token: []const u8, remainder: [][]const u8) ?[]const u8 {
+    fn extractEqualValue(token: []const u8) ?[]const u8 {
         if (std.mem.indexOf(u8, token, "=")) |idx| {
             return token[idx + 1 ..];
-        } else if (remainder.len > 0 and !std.mem.startsWith(u8, remainder[0], "-")) {
+        } else {
+            return null;
+        }
+    }
+
+    fn extractNextValue(remainder: [][]const u8) ?[]const u8 {
+        if (remainder.len > 0 and !std.mem.startsWith(u8, remainder[0], "-")) {
             return remainder[0];
         } else {
             return null;
@@ -133,41 +148,35 @@ const Args = struct {
         return null;
     }
 
-    fn fillLongValue(self: *Self, token: []const u8, remainder: [][]const u8) !void {
+    fn fillLongValue(self: *Self, token: []const u8, remainder: [][]const u8) !Action {
         var name = extractName(token);
 
         var arg: Arg = findLongArg(self.args.items, name) orelse return error.UnrecognizedOptionName;
 
+        var consumed_token_from_remainder = false;
+
         switch (arg.val_ptr) {
-            .Bool => |ptr| {
-                var value = extractValue(token, remainder) orelse "yes";
-
-                if (std.mem.eql(u8, value, "yes") or
-                    std.mem.eql(u8, value, "true") or
-                    std.mem.eql(u8, value, "y") or
-                    std.mem.eql(u8, value, "on") or
-                    std.mem.eql(u8, value, "1"))
-                {
-                    ptr.* = true;
-                } else if (std.mem.eql(u8, value, "no") or
-                    std.mem.eql(u8, value, "false") or
-                    std.mem.eql(u8, value, "n") or
-                    std.mem.eql(u8, value, "off") or
-                    std.mem.eql(u8, value, "0"))
-                {
-                    ptr.* = false;
-                } else {
-                    return error.BadBooleanValue;
-                }
+            .Flag => |ptr| {
+                ptr.* = true; // Just a bare flag. To support --xyz=on, etc, use an enum string (TODO)
             },
-            .Str => |ptr| {
-                var value = extractValue(token, remainder) orelse return error.MissingStringValue;
-                ptr.* = try self.allocator.dupe(u8, value);
-                errdefer self.allocator.free(ptr.*);
+            .Value => |ptr| {
+                const value = if (extractEqualValue(token)) |v|
+                // --xyz=something
+                    v
+                else if (extractNextValue(remainder)) |v| brk: {
+                    // --xyz something
+                    consumed_token_from_remainder = true;
+                    break :brk v;
+                } else return error.MissingStringValue;
 
-                try self.values.append(ptr.*); // Track this string to free on deinit
+                ptr.* = try self.allocator.dupe(u8, value);
+                errdefer self.allocator.free(ptr.*.?);
+
+                try self.values.append(ptr.*.?); // Track this string to free on deinit
             },
         }
+
+        return if (consumed_token_from_remainder) Action.ConsumedToken else Action.Continue;
     }
 };
 
@@ -177,16 +186,30 @@ test "args" {
     var args = Args.init(std.testing.allocator);
     defer args.deinit();
 
-    var first: bool = undefined;
-    var name: []const u8 = undefined;
+    var bool_one: ?bool = undefined; // No default value
+    var bool_two: ?bool = false;
+    var bool_three: ?bool = true; // Kind of useless?
 
-    try args.boolean("first", 'f', &first, "First option");
-    try args.string("name", 'n', &name, "Give a name!");
+    var str_one: ?[]const u8 = undefined; // No default value
+    var str_two: ?[]const u8 = "default!";
 
-    var my_args = [_][]const u8{ "--first", "off", "--first=yes", "name", "two", "-f=yep" };
+    try args.flag("bool_one", null, &bool_one, "No default boolean");
+    try args.flag("bool_two", null, &bool_two, "Boolean with default of false");
+    try args.flag("bool_three", null, &bool_three, "Useless boolean with default of true");
+
+    try args.option("str_one", null, &str_one, "No default string!");
+    try args.option("str_two", null, &str_two, "String with default");
+
+    var my_args = [_][]const u8{ "--bool_one", "--bool_two", "--str_one", "Jose", "--str_one=Nope" };
 
     try args.process(my_args[0..]);
-    std.debug.print("first={s}, name={s}\n", .{ first, name });
+    std.debug.print(
+        \\bool_one={s}
+        \\bool_two={s}
+        \\bool_three={s}
+        \\str_one={s}
+        \\str_two={s}
+    , .{ bool_one, bool_two, bool_three, str_one, str_two });
 }
 
 pub fn main() !void {
