@@ -5,7 +5,7 @@ const expectEqualStrings = std.testing.expectEqualStrings;
 const expectError = std.testing.expectError;
 
 test "Omitted flags get default values" {
-    var args = init(std.testing.allocator);
+    var args = Args.init(std.testing.allocator);
     defer args.deinit();
 
     var flag0: ?bool = null;
@@ -28,7 +28,7 @@ test "Omitted flags get default values" {
 }
 
 test "Flags can be set" {
-    var args = init(std.testing.allocator);
+    var args = Args.init(std.testing.allocator);
     defer args.deinit();
 
     var flag0: ?bool = null;
@@ -64,7 +64,7 @@ test "Flags can be set" {
 }
 
 test "Various ways to set a string value" {
-    var args = init(std.testing.allocator);
+    var args = Args.init(std.testing.allocator);
     defer args.deinit();
 
     var flag_equal: ?[]const u8 = null;
@@ -90,23 +90,55 @@ test "Various ways to set a string value" {
 }
 
 test "Expecting errors on bad input" {
-    // var args = init(std.testing.allocator);
-    // defer args.deinit();
+    var args = Args.init(std.testing.allocator);
+    defer args.deinit();
 
-    // var flag0: ?bool = null;
-    // var flag1: ?[]const u8 = null;
+    var flag0: ?bool = null;
+    var flag1: ?[]const u8 = null;
 
-    // try args.boolFlagOpt("flag0", null, &flag0, "flag0");
-    // try args.flagOpt("flag1", null, &flag1, "flag1");
+    try args.boolFlagOpt("flag0", 'a', &flag0, "flag0");
+    try args.flagOpt("flag1", 'b', &flag1, "flag1");
 
-    // var argv = [_][]const u8{"--flag10=aaa"};
-    // try args.parseSlice(argv[0..]);
+    var argv = [_][]const u8{"--flag10=aaa"};
+    expectError(error.UnrecognizedOptionName, args.parseSlice(argv[0..]));
 
-    // expectError(error.UnrecognizedOptionName, args.parseSlice(argv[0..]));
+    argv = [_][]const u8{"-c"};
+    expectError(error.UnrecognizedOptionName, args.parseSlice(argv[0..]));
+
+    argv = [_][]const u8{"-ac"};
+    expectError(error.UnrecognizedOptionName, args.parseSlice(argv[0..]));
+
+    argv = [_][]const u8{"--flag0=not_right"};
+    expectError(error.UnrecognizedBooleanValue, args.parseSlice(argv[0..]));
+}
+
+test "Missing string argument" {
+    var args = Args.init(std.testing.allocator);
+    defer args.deinit();
+
+    var miss0: ?[]const u8 = null;
+    var miss1: []const u8 = "";
+
+    try args.flagOpt("miss0", 'm', &miss0, "");
+    try args.flag("miss1", 'n', &miss1, "");
+
+    // There's four codepaths for this error...
+
+    var argv = [_][]const u8{"--miss0"};
+    expectError(error.MissingStringValue, args.parseSlice(argv[0..]));
+
+    argv = [_][]const u8{"--miss1"};
+    expectError(error.MissingStringValue, args.parseSlice(argv[0..]));
+
+    argv = [_][]const u8{"-m"};
+    expectError(error.MissingStringValue, args.parseSlice(argv[0..]));
+
+    argv = [_][]const u8{"-n"};
+    expectError(error.MissingStringValue, args.parseSlice(argv[0..]));
 }
 
 test "Various ways to set a boolean to true" {
-    var args = init(std.testing.allocator);
+    var args = Args.init(std.testing.allocator);
     defer args.deinit();
 
     var flag_basic: ?bool = null;
@@ -155,7 +187,7 @@ test "Various ways to set a boolean to true" {
 }
 
 test "Various ways to set a boolean to false" {
-    var args = init(std.testing.allocator);
+    var args = Args.init(std.testing.allocator);
     defer args.deinit();
 
     var flag_basic: ?bool = null;
@@ -205,7 +237,7 @@ test "Various ways to set a boolean to false" {
 }
 
 test "Mashing together short opts" {
-    var args = init(std.testing.allocator);
+    var args = Args.init(std.testing.allocator);
     defer args.deinit();
 
     var flag_a: ?bool = null;
@@ -257,22 +289,13 @@ const FlagConf = struct {
     description: []const u8,
     val_ptr: union(enum) {
         OptBoolFlag: *?bool,
-        OptFlag: *?[]const u8,
         BoolFlag: *bool,
+        OptFlag: *?[]const u8,
         Flag: *[]const u8,
     },
 };
 
-pub fn init(allocator: *std.mem.Allocator) Args {
-    return .{
-        .allocator = allocator,
-        .values = std.ArrayList([]const u8).init(allocator),
-        .positionals = std.ArrayList([]const u8).init(allocator),
-        .args = std.ArrayList(FlagConf).init(allocator),
-    };
-}
-
-const Args = struct {
+pub const Args = struct {
     allocator: *std.mem.Allocator,
 
     values: std.ArrayList([]const u8), // Backing array for string arguments
@@ -282,24 +305,14 @@ const Args = struct {
 
     const Self = @This();
 
-    // const FlagConf = struct {
-    //     long_name: ?[]const u8,
-    //     short_name: ?u8,
-    //     description: []const u8,
-    //     val_ptr: union(enum) {
-    //         BoolFlag: *?bool,
-    //         Flag: *?[]const u8,
-    //     },
-    // };
-
-    // pub fn init(allocator: *std.mem.Allocator) Self {
-    //     return .{
-    //         .allocator = allocator,
-    //         .values = std.ArrayList([]const u8).init(allocator),
-    //         .positionals = std.ArrayList([]const u8).init(allocator),
-    //         .args = std.ArrayList(FlagConf).init(allocator),
-    //     };
-    // }
+    pub fn init(allocator: *std.mem.Allocator) Self {
+        return .{
+            .allocator = allocator,
+            .values = std.ArrayList([]const u8).init(allocator),
+            .positionals = std.ArrayList([]const u8).init(allocator),
+            .args = std.ArrayList(FlagConf).init(allocator),
+        };
+    }
 
     pub fn deinit(self: *Self) void {
         for (self.values.items) |str| {

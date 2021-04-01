@@ -1,5 +1,5 @@
 const std = @import("std");
-const Args = @import("args.zig");
+const Args = @import("args.zig").Args;
 var stdout = std.io.getStdOut();
 
 const sep = std.fs.path.sep_str;
