@@ -13,13 +13,13 @@ test "Omitted flags get default values" {
     var flag2: ?[]const u8 = null;
     var flag3: ?[]const u8 = "default";
 
-    try args.boolFlag("flag0", 'a', &flag0, "Optional boolean");
-    try args.boolFlag("flag1", 'b', &flag1, "Default true boolean");
-    try args.flag("flag2", 'c', &flag2, "Optional string");
-    try args.flag("flag3", 'd', &flag3, "Defaulted string");
+    try args.boolFlagOpt("flag0", 'a', &flag0, "Optional boolean");
+    try args.boolFlagOpt("flag1", 'b', &flag1, "Default true boolean");
+    try args.flagOpt("flag2", 'c', &flag2, "Optional string");
+    try args.flagOpt("flag3", 'd', &flag3, "Defaulted string");
 
     var argv = [_][]const u8{};
-    try args.process(argv[0..]);
+    try args.parseSlice(argv[0..]);
 
     expect(flag0 == null);
     expect(flag1 orelse false);
@@ -36,13 +36,13 @@ test "Flags can be set" {
     var flag2: ?[]const u8 = null;
     var flag3: ?[]const u8 = "default";
 
-    try args.boolFlag("flag0", 'a', &flag0, "Optional boolean");
-    try args.boolFlag("flag1", 'b', &flag1, "Default true boolean");
-    try args.flag("flag2", 'c', &flag2, "Optional string");
-    try args.flag("flag3", 'd', &flag3, "Defaulted string");
+    try args.boolFlagOpt("flag0", 'a', &flag0, "Optional boolean");
+    try args.boolFlagOpt("flag1", 'b', &flag1, "Default true boolean");
+    try args.flagOpt("flag2", 'c', &flag2, "Optional string");
+    try args.flagOpt("flag3", 'd', &flag3, "Defaulted string");
 
     var argv = [_][]const u8{ "--flag0", "--flag1", "--flag2", "aaa", "--flag3", "bbb" };
-    try args.process(argv[0..]);
+    try args.parseSlice(argv[0..]);
 
     expect(flag0 orelse false);
     expect(flag1 orelse false);
@@ -55,7 +55,7 @@ test "Flags can be set" {
     flag3 = "default";
 
     argv = [_][]const u8{ "-a", "-b", "-c", "aaa", "-d", "bbb" };
-    try args.process(argv[0..]);
+    try args.parseSlice(argv[0..]);
 
     expect(flag0 orelse false);
     expect(flag1 orelse false);
@@ -70,11 +70,11 @@ test "Various ways to set a string value" {
     var flag_equal: ?[]const u8 = null;
     var flag_posn: ?[]const u8 = null;
 
-    try args.flag("flag_equal", 'a', &flag_equal, "flag_equal");
-    try args.flag("flag_posn", 'b', &flag_posn, "flag_posn");
+    try args.flagOpt("flag_equal", 'a', &flag_equal, "flag_equal");
+    try args.flagOpt("flag_posn", 'b', &flag_posn, "flag_posn");
 
     var argv = [_][]const u8{ "--flag_equal=aaa", "--flag_posn", "bbb" };
-    try args.process(argv[0..]);
+    try args.parseSlice(argv[0..]);
 
     expectEqualStrings("aaa", flag_equal orelse "fail");
     expectEqualStrings("bbb", flag_posn orelse "fail");
@@ -83,7 +83,7 @@ test "Various ways to set a string value" {
     flag_posn = null;
 
     argv = [_][]const u8{ "-a=aaa", "-b", "bbb" };
-    try args.process(argv[0..]);
+    try args.parseSlice(argv[0..]);
 
     expectEqualStrings("aaa", flag_equal orelse "fail");
     expectEqualStrings("bbb", flag_posn orelse "fail");
@@ -96,13 +96,13 @@ test "Expecting errors on bad input" {
     // var flag0: ?bool = null;
     // var flag1: ?[]const u8 = null;
 
-    // try args.boolFlag("flag0", null, &flag0, "flag0");
-    // try args.flag("flag1", null, &flag1, "flag1");
+    // try args.boolFlagOpt("flag0", null, &flag0, "flag0");
+    // try args.flagOpt("flag1", null, &flag1, "flag1");
 
     // var argv = [_][]const u8{"--flag10=aaa"};
-    // try args.process(argv[0..]);
+    // try args.parseSlice(argv[0..]);
 
-    // expectError(error.UnrecognizedOptionName, args.process(argv[0..]));
+    // expectError(error.UnrecognizedOptionName, args.parseSlice(argv[0..]));
 }
 
 test "Various ways to set a boolean to true" {
@@ -116,18 +116,18 @@ test "Various ways to set a boolean to true" {
     var flag_y: ?bool = null;
     var flag_1: ?bool = null;
 
-    try args.boolFlag("flag_basic", 'a', &flag_basic, "flag_basic");
-    try args.boolFlag("flag_true", 'b', &flag_true, "flag_true");
-    try args.boolFlag("flag_yes", 'c', &flag_yes, "flag_yes");
-    try args.boolFlag("flag_on", 'd', &flag_on, "flag_on");
-    try args.boolFlag("flag_y", 'e', &flag_y, "flag_y");
-    try args.boolFlag("flag_1", 'f', &flag_1, "flag_1");
+    try args.boolFlagOpt("flag_basic", 'a', &flag_basic, "flag_basic");
+    try args.boolFlagOpt("flag_true", 'b', &flag_true, "flag_true");
+    try args.boolFlagOpt("flag_yes", 'c', &flag_yes, "flag_yes");
+    try args.boolFlagOpt("flag_on", 'd', &flag_on, "flag_on");
+    try args.boolFlagOpt("flag_y", 'e', &flag_y, "flag_y");
+    try args.boolFlagOpt("flag_1", 'f', &flag_1, "flag_1");
 
     var argv = [_][]const u8{
         "--flag_basic", "--flag_true=true", "--flag_yes=yes",
         "--flag_on=on", "--flag_y=y",       "--flag_1=1",
     };
-    try args.process(argv[0..]);
+    try args.parseSlice(argv[0..]);
 
     expect(flag_basic orelse false);
     expect(flag_true orelse false);
@@ -144,7 +144,7 @@ test "Various ways to set a boolean to true" {
     flag_1 = null;
 
     argv = [_][]const u8{ "-a", "-b=true", "-c=yes", "-d=on", "-e=y", "-f=1" };
-    try args.process(argv[0..]);
+    try args.parseSlice(argv[0..]);
 
     expect(flag_basic orelse false);
     expect(flag_true orelse false);
@@ -165,19 +165,19 @@ test "Various ways to set a boolean to false" {
     var flag_y: ?bool = null;
     var flag_1: ?bool = null;
 
-    try args.boolFlag("flag_basic", 'a', &flag_basic, "flag_basic");
-    try args.boolFlag("flag_true", 'b', &flag_true, "flag_true");
-    try args.boolFlag("flag_yes", 'c', &flag_yes, "flag_yes");
-    try args.boolFlag("flag_on", 'd', &flag_on, "flag_on");
-    try args.boolFlag("flag_y", 'e', &flag_y, "flag_y");
-    try args.boolFlag("flag_1", 'f', &flag_1, "flag_1");
+    try args.boolFlagOpt("flag_basic", 'a', &flag_basic, "flag_basic");
+    try args.boolFlagOpt("flag_true", 'b', &flag_true, "flag_true");
+    try args.boolFlagOpt("flag_yes", 'c', &flag_yes, "flag_yes");
+    try args.boolFlagOpt("flag_on", 'd', &flag_on, "flag_on");
+    try args.boolFlagOpt("flag_y", 'e', &flag_y, "flag_y");
+    try args.boolFlagOpt("flag_1", 'f', &flag_1, "flag_1");
 
     var argv = [_][]const u8{
         "--flag_true=false", "--flag_yes=no",
         "--flag_on=off",     "--flag_y=n",
         "--flag_1=0",
     };
-    try args.process(argv[0..]);
+    try args.parseSlice(argv[0..]);
 
     expect(flag_basic == null);
     expect(!flag_true.?);
@@ -194,7 +194,7 @@ test "Various ways to set a boolean to false" {
     flag_1 = null;
 
     argv = [_][]const u8{ "-b=false", "-c=no", "-d=off", "-e=n", "-f=0" };
-    try args.process(argv[0..]);
+    try args.parseSlice(argv[0..]);
 
     expect(flag_basic == null);
     expect(!flag_true.?);
@@ -221,21 +221,21 @@ test "Mashing together short opts" {
     var flag_h: ?bool = null;
     var flag_i: ?[]const u8 = null;
 
-    try args.boolFlag(null, 'a', &flag_a, "");
-    try args.boolFlag(null, 'b', &flag_b, "");
-    try args.boolFlag(null, 'c', &flag_c, "");
+    try args.boolFlagOpt(null, 'a', &flag_a, "");
+    try args.boolFlagOpt(null, 'b', &flag_b, "");
+    try args.boolFlagOpt(null, 'c', &flag_c, "");
 
-    try args.flag(null, 'd', &flag_d, "");
-    try args.flag(null, 'e', &flag_e, "");
+    try args.flagOpt(null, 'd', &flag_d, "");
+    try args.flagOpt(null, 'e', &flag_e, "");
 
-    try args.boolFlag(null, 'f', &flag_f, "");
-    try args.flag(null, 'g', &flag_g, "");
+    try args.boolFlagOpt(null, 'f', &flag_f, "");
+    try args.flagOpt(null, 'g', &flag_g, "");
 
-    try args.boolFlag(null, 'h', &flag_h, "");
-    try args.flag(null, 'i', &flag_i, "");
+    try args.boolFlagOpt(null, 'h', &flag_h, "");
+    try args.flagOpt(null, 'i', &flag_i, "");
 
     var argv = [_][]const u8{ "-abc=no", "-d=pass", "-e", "pass", "-fg=pass", "-hi", "pass" };
-    try args.process(argv[0..]);
+    try args.parseSlice(argv[0..]);
 
     expect(flag_a.?);
     expect(flag_b.?);
@@ -256,8 +256,10 @@ const FlagConf = struct {
     short_name: ?u8,
     description: []const u8,
     val_ptr: union(enum) {
-        BoolFlag: *?bool,
-        Flag: *?[]const u8,
+        OptBoolFlag: *?bool,
+        OptFlag: *?[]const u8,
+        BoolFlag: *bool,
+        Flag: *[]const u8,
     },
 };
 
@@ -270,7 +272,7 @@ pub fn init(allocator: *std.mem.Allocator) Args {
     };
 }
 
-pub const Args = struct {
+const Args = struct {
     allocator: *std.mem.Allocator,
 
     values: std.ArrayList([]const u8), // Backing array for string arguments
@@ -313,7 +315,7 @@ pub const Args = struct {
         self.args.deinit();
     }
 
-    pub fn boolFlag(self: *Self, long: ?[]const u8, short: ?u8, ptr: *?bool, desc: []const u8) !void {
+    pub fn boolFlag(self: *Self, long: ?[]const u8, short: ?u8, ptr: *bool, desc: []const u8) !void {
         try self.args.append(FlagConf{
             .long_name = long,
             .short_name = short,
@@ -322,7 +324,16 @@ pub const Args = struct {
         });
     }
 
-    pub fn flag(self: *Self, long: ?[]const u8, short: ?u8, ptr: *?[]const u8, desc: []const u8) !void {
+    pub fn boolFlagOpt(self: *Self, long: ?[]const u8, short: ?u8, ptr: *?bool, desc: []const u8) !void {
+        try self.args.append(FlagConf{
+            .long_name = long,
+            .short_name = short,
+            .description = desc,
+            .val_ptr = .{ .OptBoolFlag = ptr },
+        });
+    }
+
+    pub fn flag(self: *Self, long: ?[]const u8, short: ?u8, ptr: *[]const u8, desc: []const u8) !void {
         try self.args.append(FlagConf{
             .long_name = long,
             .short_name = short,
@@ -331,14 +342,23 @@ pub const Args = struct {
         });
     }
 
+    pub fn flagOpt(self: *Self, long: ?[]const u8, short: ?u8, ptr: *?[]const u8, desc: []const u8) !void {
+        try self.args.append(FlagConf{
+            .long_name = long,
+            .short_name = short,
+            .description = desc,
+            .val_ptr = .{ .OptFlag = ptr },
+        });
+    }
+
     pub fn positionals(self: *Self) [][]const u8 {
         return self.positionals.items;
     }
 
-    pub fn processCommandLine(self: *Self) !void {
+    pub fn parse(self: *Self) !void {
         var argv = try std.process.argsAlloc(self.allocator);
         defer std.process.argsFree(self.allocator, argv);
-        try process(argv);
+        try self.parseSlice(argv[0..]);
     }
 
     const Action = enum {
@@ -347,7 +367,7 @@ pub const Args = struct {
         SkipNextToken,
     };
 
-    pub fn process(self: *Self, argv: [][]const u8) !void {
+    pub fn parseSlice(self: *Self, argv: [][]const u8) !void {
         var no_more_flags = false;
 
         var idx: usize = 0;
@@ -355,7 +375,7 @@ pub const Args = struct {
             var token = argv[idx];
 
             if (no_more_flags) {
-                std.debug.print("Positional {s}\n", .{token});
+                try self.positionals.append(try self.allocator.dupe(u8, token));
             } else {
                 if (std.mem.eql(u8, token, "--")) {
                     no_more_flags = true;
@@ -386,7 +406,7 @@ pub const Args = struct {
                         }
                     }
                 } else {
-                    std.debug.print("Positional {s}\n", .{token});
+                    try self.positionals.append(try self.allocator.dupe(u8, token));
                 }
             }
         }
@@ -480,6 +500,14 @@ pub const Args = struct {
                     ptr.* = true;
                 }
             },
+            .OptBoolFlag => |ptr| {
+                action_taken = Action.ContinueToNextToken;
+                if (extractEqualValue(token)) |value| {
+                    ptr.* = try toTruthy(value);
+                } else {
+                    ptr.* = true;
+                }
+            },
             .Flag => |ptr| {
                 var value: []const u8 = undefined;
 
@@ -491,9 +519,26 @@ pub const Args = struct {
                     value = v;
                 } else return error.MissingStringValue;
 
-                ptr.* = try self.allocator.dupe(u8, value);
-                errdefer self.allocator.free(ptr.*.?);
-                try self.values.append(ptr.*.?); // Track this string to free on deinit
+                const value_copy = try self.allocator.dupe(u8, value);
+                errdefer self.allocator.free(value_copy);
+                try self.values.append(value_copy); // Track this string to free on deinit
+                ptr.* = value_copy;
+            },
+            .OptFlag => |ptr| {
+                var value: []const u8 = undefined;
+
+                if (extractEqualValue(token)) |v| {
+                    action_taken = Action.ContinueToNextToken;
+                    value = v;
+                } else if (extractNextValue(remainder)) |v| {
+                    action_taken = Action.SkipNextToken;
+                    value = v;
+                } else return error.MissingStringValue;
+
+                const value_copy = try self.allocator.dupe(u8, value);
+                errdefer self.allocator.free(value_copy);
+                try self.values.append(value_copy); // Track this string to free on deinit
+                ptr.* = value_copy;
             },
         }
 
@@ -516,6 +561,15 @@ pub const Args = struct {
                     ptr.* = true;
                 }
             },
+            .OptBoolFlag => |ptr| {
+                if (token.len > 1 and token[1] == '=') {
+                    action_taken = Action.ContinueToNextToken; // didn't use any of the remainder
+                    ptr.* = try toTruthy(token[2..]);
+                } else {
+                    action_taken = Action.AdvanceOneCharacter;
+                    ptr.* = true;
+                }
+            },
             .Flag => |ptr| {
                 var value: []const u8 = undefined;
 
@@ -529,9 +583,28 @@ pub const Args = struct {
                     return error.MissingStringValue;
                 }
 
-                ptr.* = try self.allocator.dupe(u8, value);
-                errdefer self.allocator.free(ptr.*.?);
-                try self.values.append(ptr.*.?);
+                const value_copy = try self.allocator.dupe(u8, value);
+                errdefer self.allocator.free(value_copy);
+                try self.values.append(value_copy);
+                ptr.* = value_copy;
+            },
+            .OptFlag => |ptr| {
+                var value: []const u8 = undefined;
+
+                if (token.len > 1 and token[1] == '=') {
+                    action_taken = Action.ContinueToNextToken;
+                    value = token[2..];
+                } else if (extractNextValue(remainder)) |v| {
+                    action_taken = Action.SkipNextToken;
+                    value = v;
+                } else {
+                    return error.MissingStringValue;
+                }
+
+                const value_copy = try self.allocator.dupe(u8, value);
+                errdefer self.allocator.free(value_copy);
+                try self.values.append(value_copy);
+                ptr.* = value_copy;
             },
         }
 

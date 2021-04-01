@@ -1,4 +1,5 @@
 const std = @import("std");
+const Args = @import("args.zig");
 var stdout = std.io.getStdOut();
 
 const sep = std.fs.path.sep_str;
@@ -12,7 +13,7 @@ pub fn main() !void {
     var buffer: [4096]u8 = undefined;
     var cwd = try std.os.getcwd(buffer[0..]);
 
-    const cfg = Config{ .use_color = std.os.isatty(stdout.handle) };
+    var cfg = Config{ .use_color = std.os.isatty(stdout.handle) };
 
     var outs = std.io.bufferedWriter(stdout.writer());
     defer outs.flush() catch {};
@@ -29,7 +30,10 @@ pub fn main() !void {
 
     var args = Args.init(allocator);
     defer args.deinit();
-    try args.process();
+
+    try args.boolFlag("color", 'c', &cfg.use_color, "Enable use of color (defaults to isatty)");
+    try args.boolFlag("files", 'f', &cfg.files_only, "Only print files");
+    try args.parse();
 
     var proc = Proc(@TypeOf(writer)).init(allocator, cfg, &writer);
     try proc.run(cwd);
