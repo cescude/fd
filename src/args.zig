@@ -1,3 +1,8 @@
+// TODO: help strings
+// TODO: testing positionals
+// TODO: friendly error strings to go along with the unfriendly error tags
+// TODO: consolidate errors into just OutOfMemory and ParseError?
+// TODO: documentation
 const std = @import("std");
 
 const FlagConf = struct {
@@ -12,393 +17,397 @@ const FlagConf = struct {
     },
 };
 
-const SubCommand = struct {
-    name: []const u8,
-    id: u32, // No more than 2^32 subcommands...
-    args: Args,
-};
+pub const Args = FullOpts(void); // Simple non-subcommand-using option parsing
 
-pub const Args = struct {
-    allocator: *std.mem.Allocator,
-
-    values: std.ArrayList([]const u8), // Backing array for string arguments
-    positionals: std.ArrayList([]const u8), // Backing array for positional arguments
-
-    flags: std.ArrayList(FlagConf), // List of argument patterns
-    subcommands: std.ArrayList(SubCommand), // Allow to switch into namespaced command args
-    command_used: ?u32,
-
-    const Self = @This();
-
-    const Error = error{ UnrecognizedBooleanValue, UnrecognizedOptionName, MissingStringValue, OutOfMemory };
-
-    pub fn init(allocator: *std.mem.Allocator) Self {
-        return .{
-            .allocator = allocator,
-            .values = std.ArrayList([]const u8).init(allocator),
-            .positionals = std.ArrayList([]const u8).init(allocator),
-            .flags = std.ArrayList(FlagConf).init(allocator),
-            .subcommands = std.ArrayList(SubCommand).init(allocator),
-            .command_used = null,
-        };
-    }
-
-    pub fn deinit(self: *Self) void {
-        for (self.values.items) |str| {
-            self.allocator.free(str);
-        }
-        self.values.deinit();
-
-        for (self.positionals.items) |str| {
-            self.allocator.free(str);
-        }
-        self.positionals.deinit();
-
-        self.flags.deinit();
-
-        for (self.subcommands.items) |*sub| {
-            sub.args.deinit();
-        }
-        self.subcommands.deinit();
-    }
-
-    pub fn boolFlag(self: *Self, long: ?[]const u8, short: ?u8, ptr: *bool, desc: []const u8) !void {
-        try self.flags.append(FlagConf{
-            .long_name = long,
-            .short_name = short,
-            .description = desc,
-            .val_ptr = .{ .BoolFlag = ptr },
-        });
-    }
-
-    pub fn boolFlagOpt(self: *Self, long: ?[]const u8, short: ?u8, ptr: *?bool, desc: []const u8) !void {
-        try self.flags.append(FlagConf{
-            .long_name = long,
-            .short_name = short,
-            .description = desc,
-            .val_ptr = .{ .OptBoolFlag = ptr },
-        });
-    }
-
-    pub fn flag(self: *Self, long: ?[]const u8, short: ?u8, ptr: *[]const u8, desc: []const u8) !void {
-        try self.flags.append(FlagConf{
-            .long_name = long,
-            .short_name = short,
-            .description = desc,
-            .val_ptr = .{ .Flag = ptr },
-        });
-    }
-
-    pub fn flagOpt(self: *Self, long: ?[]const u8, short: ?u8, ptr: *?[]const u8, desc: []const u8) !void {
-        try self.flags.append(FlagConf{
-            .long_name = long,
-            .short_name = short,
-            .description = desc,
-            .val_ptr = .{ .OptFlag = ptr },
-        });
-    }
-
-    pub fn command(self: *Self, name: []const u8, comptime cmd: anytype) !*Self {
-        try self.subcommands.append(SubCommand{
-            .name = name,
-            .id = @enumToInt(cmd),
-            .args = Args.init(self.allocator),
-        });
-        return &self.subcommands.items[self.subcommands.items.len - 1].args;
-    }
-
-    pub fn getCommand(self: *Self, comptime T: type) ?T {
-        if (self.command_used) |id| {
-            return @intToEnum(T, id);
-        }
-        return null;
-    }
-
-    pub fn positionals(self: *Self) [][]const u8 {
-        return self.positionals.items;
-    }
-
-    pub fn parse(self: *Self) !void {
-        var argv = try std.process.argsAlloc(self.allocator);
-        defer std.process.argsFree(self.allocator, argv);
-        try self.parseSlice(argv[0..]);
-    }
-
-    const Action = enum {
-        AdvanceOneCharacter,
-        ContinueToNextToken,
-        SkipNextToken,
+// Option parsing that allows for subcommands (just pass the enum type to construct)
+pub fn FullOpts(comptime CommandEnumT: type) type {
+    const SubCommand = struct {
+        name: []const u8,
+        cmd: CommandEnumT, // No more than 2^32 subcommands...
+        args: Args,
     };
 
-    pub fn parseSlice(self: *Self, argv: [][]const u8) Error!void {
-        var no_more_flags = false;
+    return struct {
+        allocator: *std.mem.Allocator,
 
-        var idx: usize = 0;
-        while (idx < argv.len) : (idx += 1) {
-            var token = argv[idx];
+        values: std.ArrayList([]const u8), // Backing array for string arguments
+        positionals: std.ArrayList([]const u8), // Backing array for positional arguments
 
-            if (no_more_flags) {
-                try self.addPositional(token); // TODO: needs test case
-            } else {
-                if (std.mem.eql(u8, token, "--")) {
-                    no_more_flags = true;
-                } else if (std.mem.startsWith(u8, token, "--")) {
-                    const action = try self.fillLongValue(token[2..], argv[idx + 1 ..]);
-                    switch (action) {
-                        .AdvanceOneCharacter => unreachable,
-                        .ContinueToNextToken => {},
-                        .SkipNextToken => idx += 1, // we used argv[idx+1] for the value
-                    }
-                } else if (std.mem.eql(u8, token, "-")) {
+        flags: std.ArrayList(FlagConf), // List of argument patterns
+        subcommands: std.ArrayList(SubCommand), // Allow to switch into namespaced command args
+        command_used: ?CommandEnumT,
+
+        const Self = @This();
+
+        const Error = error{ UnrecognizedBooleanValue, UnrecognizedOptionName, MissingStringValue, OutOfMemory };
+
+        pub fn init(allocator: *std.mem.Allocator) Self {
+            return .{
+                .allocator = allocator,
+                .values = std.ArrayList([]const u8).init(allocator),
+                .positionals = std.ArrayList([]const u8).init(allocator),
+                .flags = std.ArrayList(FlagConf).init(allocator),
+                .subcommands = std.ArrayList(SubCommand).init(allocator),
+                .command_used = null,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            for (self.values.items) |str| {
+                self.allocator.free(str);
+            }
+            self.values.deinit();
+
+            for (self.positionals.items) |str| {
+                self.allocator.free(str);
+            }
+            self.positionals.deinit();
+
+            self.flags.deinit();
+
+            for (self.subcommands.items) |*sub| {
+                sub.args.deinit();
+            }
+            self.subcommands.deinit();
+        }
+
+        pub fn boolFlag(self: *Self, long: ?[]const u8, short: ?u8, ptr: *bool, desc: []const u8) !void {
+            try self.flags.append(FlagConf{
+                .long_name = long,
+                .short_name = short,
+                .description = desc,
+                .val_ptr = .{ .BoolFlag = ptr },
+            });
+        }
+
+        pub fn boolFlagOpt(self: *Self, long: ?[]const u8, short: ?u8, ptr: *?bool, desc: []const u8) !void {
+            try self.flags.append(FlagConf{
+                .long_name = long,
+                .short_name = short,
+                .description = desc,
+                .val_ptr = .{ .OptBoolFlag = ptr },
+            });
+        }
+
+        pub fn flag(self: *Self, long: ?[]const u8, short: ?u8, ptr: *[]const u8, desc: []const u8) !void {
+            try self.flags.append(FlagConf{
+                .long_name = long,
+                .short_name = short,
+                .description = desc,
+                .val_ptr = .{ .Flag = ptr },
+            });
+        }
+
+        pub fn flagOpt(self: *Self, long: ?[]const u8, short: ?u8, ptr: *?[]const u8, desc: []const u8) !void {
+            try self.flags.append(FlagConf{
+                .long_name = long,
+                .short_name = short,
+                .description = desc,
+                .val_ptr = .{ .OptFlag = ptr },
+            });
+        }
+
+        // For right now, we don't support subcommands of subcommands.
+        pub fn command(self: *Self, name: []const u8, cmd: CommandEnumT) !*Args {
+            try self.subcommands.append(SubCommand{
+                .name = name,
+                .cmd = cmd,
+                .args = Args.init(self.allocator),
+            });
+            return &self.subcommands.items[self.subcommands.items.len - 1].args;
+        }
+
+        pub fn getCommand(self: *Self) ?CommandEnumT {
+            return self.command_used;
+        }
+
+        pub fn positionals(self: *Self) [][]const u8 {
+            return self.positionals.items;
+        }
+
+        pub fn parse(self: *Self) !void {
+            var argv = try std.process.argsAlloc(self.allocator);
+            defer std.process.argsFree(self.allocator, argv);
+            try self.parseSlice(argv[0..]);
+        }
+
+        const Action = enum {
+            AdvanceOneCharacter,
+            ContinueToNextToken,
+            SkipNextToken,
+        };
+
+        pub fn parseSlice(self: *Self, argv: [][]const u8) Error!void {
+            var no_more_flags = false;
+            self.command_used = null;
+
+            var idx: usize = 0;
+            while (idx < argv.len) : (idx += 1) {
+                var token = argv[idx];
+
+                if (no_more_flags) {
                     try self.addPositional(token); // TODO: needs test case
-                } else if (std.mem.startsWith(u8, token, "-")) {
-
-                    // Pull out all short flags from the token
-                    token = token[1..];
-                    shortloop: while (token.len > 0) {
-                        const action = try self.fillShortValue(token, argv[idx + 1 ..]);
-                        switch (action) {
-                            .AdvanceOneCharacter => token = token[1..], // go to the next short flag
-                            .ContinueToNextToken => {
-                                break :shortloop;
-                            },
-                            .SkipNextToken => {
-                                idx += 1;
-                                break :shortloop;
-                            },
-                        }
-                    }
                 } else {
-                    if (self.positionals.items.len == 0) {
+                    if (std.mem.eql(u8, token, "--")) {
+                        no_more_flags = true;
+                    } else if (std.mem.startsWith(u8, token, "--")) {
+                        const action = try self.fillLongValue(token[2..], argv[idx + 1 ..]);
+                        switch (action) {
+                            .AdvanceOneCharacter => unreachable,
+                            .ContinueToNextToken => {},
+                            .SkipNextToken => idx += 1, // we used argv[idx+1] for the value
+                        }
+                    } else if (std.mem.eql(u8, token, "-")) {
+                        try self.addPositional(token); // TODO: needs test case
+                    } else if (std.mem.startsWith(u8, token, "-")) {
 
-                        // If this is the first positional token we've
-                        // encountered (before a "--"), check to see if
-                        // a subcommand is being referenced.
-
-                        // TODO: needs testing
-                        for (self.subcommands.items) |*sub_cmd| {
-                            if (std.mem.eql(u8, sub_cmd.name, token)) {
-                                self.command_used = sub_cmd.id;
-                                try sub_cmd.args.parseSlice(argv[idx + 1 ..]);
-                                break;
+                        // Pull out all short flags from the token
+                        token = token[1..];
+                        shortloop: while (token.len > 0) {
+                            const action = try self.fillShortValue(token, argv[idx + 1 ..]);
+                            switch (action) {
+                                .AdvanceOneCharacter => token = token[1..], // go to the next short flag
+                                .ContinueToNextToken => {
+                                    break :shortloop;
+                                },
+                                .SkipNextToken => {
+                                    idx += 1;
+                                    break :shortloop;
+                                },
                             }
-                        } else {
-
-                            // Nope, no subcommand, so just treat like a normal
-                            // positional.
-                            try self.addPositional(token); // TODO: needs test case
                         }
                     } else {
-                        try self.addPositional(token); // TODO: needs test case
+                        if (self.positionals.items.len == 0) {
+
+                            // If this is the first positional token we've
+                            // encountered (before a "--"), check to see if
+                            // a subcommand is being referenced.
+
+                            // TODO: needs testing
+                            for (self.subcommands.items) |*sub_cmd| {
+                                if (std.mem.eql(u8, sub_cmd.name, token)) {
+                                    self.command_used = sub_cmd.cmd;
+                                    try sub_cmd.args.parseSlice(argv[idx + 1 ..]);
+                                    return;
+                                }
+                            } else {
+
+                                // Nope, no subcommand, so just treat like a normal
+                                // positional.
+                                try self.addPositional(token); // TODO: needs test case
+                            }
+                        } else {
+                            try self.addPositional(token); // TODO: needs test case
+                        }
                     }
                 }
             }
         }
-    }
 
-    fn addPositional(self: *Self, value: []const u8) !void {
-        try self.positionals.append(try self.allocator.dupe(u8, value));
-    }
-
-    fn extractName(token: []const u8) []const u8 {
-        if (std.mem.indexOf(u8, token, "=")) |idx| {
-            return token[0..idx];
-        } else {
-            return token;
+        fn addPositional(self: *Self, value: []const u8) !void {
+            try self.positionals.append(try self.allocator.dupe(u8, value));
         }
-    }
 
-    fn extractEqualValue(token: []const u8) ?[]const u8 {
-        if (std.mem.indexOf(u8, token, "=")) |idx| {
-            return token[idx + 1 ..];
-        } else {
-            return null;
+        fn extractName(token: []const u8) []const u8 {
+            if (std.mem.indexOf(u8, token, "=")) |idx| {
+                return token[0..idx];
+            } else {
+                return token;
+            }
         }
-    }
 
-    fn extractNextValue(remainder: [][]const u8) ?[]const u8 {
-        if (remainder.len > 0 and !std.mem.startsWith(u8, remainder[0], "-")) {
-            return remainder[0];
-        } else {
-            return null;
+        fn extractEqualValue(token: []const u8) ?[]const u8 {
+            if (std.mem.indexOf(u8, token, "=")) |idx| {
+                return token[idx + 1 ..];
+            } else {
+                return null;
+            }
         }
-    }
 
-    fn getFlagByLongName(args: []FlagConf, name: []const u8) ?FlagConf {
-        for (args) |arg| {
-            if (arg.long_name) |long_name| {
-                if (std.mem.eql(u8, long_name, name)) {
-                    return arg;
+        fn extractNextValue(remainder: [][]const u8) ?[]const u8 {
+            if (remainder.len > 0 and !std.mem.startsWith(u8, remainder[0], "-")) {
+                return remainder[0];
+            } else {
+                return null;
+            }
+        }
+
+        fn getFlagByLongName(args: []FlagConf, name: []const u8) ?FlagConf {
+            for (args) |arg| {
+                if (arg.long_name) |long_name| {
+                    if (std.mem.eql(u8, long_name, name)) {
+                        return arg;
+                    }
                 }
             }
+
+            return null;
         }
 
-        return null;
-    }
-
-    fn getFlagByShortName(args: []FlagConf, name: u8) ?FlagConf {
-        for (args) |arg| {
-            if (arg.short_name) |short_name| {
-                if (short_name == name) {
-                    return arg;
+        fn getFlagByShortName(args: []FlagConf, name: u8) ?FlagConf {
+            for (args) |arg| {
+                if (arg.short_name) |short_name| {
+                    if (short_name == name) {
+                        return arg;
+                    }
                 }
             }
+
+            return null;
         }
 
-        return null;
-    }
-
-    fn contains(comptime T: type, needle: []const T, haystack: [][]const T) bool {
-        for (haystack) |hay| {
-            if (std.mem.eql(T, needle, hay)) {
-                return true;
+        fn contains(comptime T: type, needle: []const T, haystack: [][]const T) bool {
+            for (haystack) |hay| {
+                if (std.mem.eql(T, needle, hay)) {
+                    return true;
+                }
             }
-        }
 
-        return false;
-    }
-
-    fn toTruthy(val: []const u8) !bool {
-        var truly: [5][]const u8 = .{ "true", "yes", "on", "y", "1" };
-        var falsy: [5][]const u8 = .{ "false", "no", "off", "n", "0" };
-
-        if (contains(u8, val, truly[0..])) {
-            return true;
-        }
-
-        if (contains(u8, val, falsy[0..])) {
             return false;
         }
 
-        return error.UnrecognizedBooleanValue;
-    }
+        fn toTruthy(val: []const u8) !bool {
+            var truly: [5][]const u8 = .{ "true", "yes", "on", "y", "1" };
+            var falsy: [5][]const u8 = .{ "false", "no", "off", "n", "0" };
 
-    fn fillLongValue(self: *Self, token: []const u8, remainder: [][]const u8) !Action {
-        var name = extractName(token);
-        var arg: FlagConf = getFlagByLongName(self.flags.items, name) orelse return error.UnrecognizedOptionName;
+            if (contains(u8, val, truly[0..])) {
+                return true;
+            }
 
-        var action_taken: Action = undefined;
+            if (contains(u8, val, falsy[0..])) {
+                return false;
+            }
 
-        switch (arg.val_ptr) {
-            .BoolFlag => |ptr| {
-                action_taken = Action.ContinueToNextToken;
-                if (extractEqualValue(token)) |value| {
-                    ptr.* = try toTruthy(value);
-                } else {
-                    ptr.* = true;
-                }
-            },
-            .OptBoolFlag => |ptr| {
-                action_taken = Action.ContinueToNextToken;
-                if (extractEqualValue(token)) |value| {
-                    ptr.* = try toTruthy(value);
-                } else {
-                    ptr.* = true;
-                }
-            },
-            .Flag => |ptr| {
-                var value: []const u8 = undefined;
-
-                if (extractEqualValue(token)) |v| {
-                    action_taken = Action.ContinueToNextToken;
-                    value = v;
-                } else if (extractNextValue(remainder)) |v| {
-                    action_taken = Action.SkipNextToken;
-                    value = v;
-                } else return error.MissingStringValue;
-
-                const value_copy = try self.allocator.dupe(u8, value);
-                errdefer self.allocator.free(value_copy);
-                try self.values.append(value_copy); // Track this string to free on deinit
-                ptr.* = value_copy;
-            },
-            .OptFlag => |ptr| {
-                var value: []const u8 = undefined;
-
-                if (extractEqualValue(token)) |v| {
-                    action_taken = Action.ContinueToNextToken;
-                    value = v;
-                } else if (extractNextValue(remainder)) |v| {
-                    action_taken = Action.SkipNextToken;
-                    value = v;
-                } else return error.MissingStringValue;
-
-                const value_copy = try self.allocator.dupe(u8, value);
-                errdefer self.allocator.free(value_copy);
-                try self.values.append(value_copy); // Track this string to free on deinit
-                ptr.* = value_copy;
-            },
+            return error.UnrecognizedBooleanValue;
         }
 
-        return action_taken;
-    }
+        fn fillLongValue(self: *Self, token: []const u8, remainder: [][]const u8) !Action {
+            var name = extractName(token);
+            var arg: FlagConf = getFlagByLongName(self.flags.items, name) orelse return error.UnrecognizedOptionName;
 
-    fn fillShortValue(self: *Self, token: []const u8, remainder: [][]const u8) !Action {
-        var name = token[0];
-        var arg: FlagConf = getFlagByShortName(self.flags.items, name) orelse return error.UnrecognizedOptionName;
+            var action_taken: Action = undefined;
 
-        var action_taken: Action = undefined;
-
-        switch (arg.val_ptr) {
-            .BoolFlag => |ptr| {
-                if (token.len > 1 and token[1] == '=') {
-                    action_taken = Action.ContinueToNextToken; // didn't use any of the remainder
-                    ptr.* = try toTruthy(token[2..]);
-                } else {
-                    action_taken = Action.AdvanceOneCharacter;
-                    ptr.* = true;
-                }
-            },
-            .OptBoolFlag => |ptr| {
-                if (token.len > 1 and token[1] == '=') {
-                    action_taken = Action.ContinueToNextToken; // didn't use any of the remainder
-                    ptr.* = try toTruthy(token[2..]);
-                } else {
-                    action_taken = Action.AdvanceOneCharacter;
-                    ptr.* = true;
-                }
-            },
-            .Flag => |ptr| {
-                var value: []const u8 = undefined;
-
-                if (token.len > 1 and token[1] == '=') {
+            switch (arg.val_ptr) {
+                .BoolFlag => |ptr| {
                     action_taken = Action.ContinueToNextToken;
-                    value = token[2..];
-                } else if (extractNextValue(remainder)) |v| {
-                    action_taken = Action.SkipNextToken;
-                    value = v;
-                } else {
-                    return error.MissingStringValue;
-                }
-
-                const value_copy = try self.allocator.dupe(u8, value);
-                errdefer self.allocator.free(value_copy);
-                try self.values.append(value_copy);
-                ptr.* = value_copy;
-            },
-            .OptFlag => |ptr| {
-                var value: []const u8 = undefined;
-
-                if (token.len > 1 and token[1] == '=') {
+                    if (extractEqualValue(token)) |value| {
+                        ptr.* = try toTruthy(value);
+                    } else {
+                        ptr.* = true;
+                    }
+                },
+                .OptBoolFlag => |ptr| {
                     action_taken = Action.ContinueToNextToken;
-                    value = token[2..];
-                } else if (extractNextValue(remainder)) |v| {
-                    action_taken = Action.SkipNextToken;
-                    value = v;
-                } else {
-                    return error.MissingStringValue;
-                }
+                    if (extractEqualValue(token)) |value| {
+                        ptr.* = try toTruthy(value);
+                    } else {
+                        ptr.* = true;
+                    }
+                },
+                .Flag => |ptr| {
+                    var value: []const u8 = undefined;
 
-                const value_copy = try self.allocator.dupe(u8, value);
-                errdefer self.allocator.free(value_copy);
-                try self.values.append(value_copy);
-                ptr.* = value_copy;
-            },
+                    if (extractEqualValue(token)) |v| {
+                        action_taken = Action.ContinueToNextToken;
+                        value = v;
+                    } else if (extractNextValue(remainder)) |v| {
+                        action_taken = Action.SkipNextToken;
+                        value = v;
+                    } else return error.MissingStringValue;
+
+                    const value_copy = try self.allocator.dupe(u8, value);
+                    errdefer self.allocator.free(value_copy);
+                    try self.values.append(value_copy); // Track this string to free on deinit
+                    ptr.* = value_copy;
+                },
+                .OptFlag => |ptr| {
+                    var value: []const u8 = undefined;
+
+                    if (extractEqualValue(token)) |v| {
+                        action_taken = Action.ContinueToNextToken;
+                        value = v;
+                    } else if (extractNextValue(remainder)) |v| {
+                        action_taken = Action.SkipNextToken;
+                        value = v;
+                    } else return error.MissingStringValue;
+
+                    const value_copy = try self.allocator.dupe(u8, value);
+                    errdefer self.allocator.free(value_copy);
+                    try self.values.append(value_copy); // Track this string to free on deinit
+                    ptr.* = value_copy;
+                },
+            }
+
+            return action_taken;
         }
 
-        return action_taken;
-    }
-};
+        fn fillShortValue(self: *Self, token: []const u8, remainder: [][]const u8) !Action {
+            var name = token[0];
+            var arg: FlagConf = getFlagByShortName(self.flags.items, name) orelse return error.UnrecognizedOptionName;
+
+            var action_taken: Action = undefined;
+
+            switch (arg.val_ptr) {
+                .BoolFlag => |ptr| {
+                    if (token.len > 1 and token[1] == '=') {
+                        action_taken = Action.ContinueToNextToken; // didn't use any of the remainder
+                        ptr.* = try toTruthy(token[2..]);
+                    } else {
+                        action_taken = Action.AdvanceOneCharacter;
+                        ptr.* = true;
+                    }
+                },
+                .OptBoolFlag => |ptr| {
+                    if (token.len > 1 and token[1] == '=') {
+                        action_taken = Action.ContinueToNextToken; // didn't use any of the remainder
+                        ptr.* = try toTruthy(token[2..]);
+                    } else {
+                        action_taken = Action.AdvanceOneCharacter;
+                        ptr.* = true;
+                    }
+                },
+                .Flag => |ptr| {
+                    var value: []const u8 = undefined;
+
+                    if (token.len > 1 and token[1] == '=') {
+                        action_taken = Action.ContinueToNextToken;
+                        value = token[2..];
+                    } else if (extractNextValue(remainder)) |v| {
+                        action_taken = Action.SkipNextToken;
+                        value = v;
+                    } else {
+                        return error.MissingStringValue;
+                    }
+
+                    const value_copy = try self.allocator.dupe(u8, value);
+                    errdefer self.allocator.free(value_copy);
+                    try self.values.append(value_copy);
+                    ptr.* = value_copy;
+                },
+                .OptFlag => |ptr| {
+                    var value: []const u8 = undefined;
+
+                    if (token.len > 1 and token[1] == '=') {
+                        action_taken = Action.ContinueToNextToken;
+                        value = token[2..];
+                    } else if (extractNextValue(remainder)) |v| {
+                        action_taken = Action.SkipNextToken;
+                        value = v;
+                    } else {
+                        return error.MissingStringValue;
+                    }
+
+                    const value_copy = try self.allocator.dupe(u8, value);
+                    errdefer self.allocator.free(value_copy);
+                    try self.values.append(value_copy);
+                    ptr.* = value_copy;
+                },
+            }
+
+            return action_taken;
+        }
+    };
+}
 
 const expect = std.testing.expect;
 const expectEqualStrings = std.testing.expectEqualStrings;
@@ -684,13 +693,13 @@ test "Mashing together short opts" {
 }
 
 test "Basic SubCommands" {
-    var opts = Args.init(std.testing.allocator);
-    defer opts.deinit();
-
     const Cmd = enum {
         Move,
         Turn,
     };
+
+    var opts = FullOpts(Cmd).init(std.testing.allocator);
+    defer opts.deinit();
 
     const MoveCfg = struct {
         x: []const u8 = "",
@@ -712,18 +721,38 @@ test "Basic SubCommands" {
     var turn_opts = try opts.command("turn", Cmd.Turn);
     try turn_opts.flag("angle", 'a', &turn_cfg.angle, "How far to turn");
 
-    var argv = [_][]const u8{ "move", "-x=10", "-y", "20" };
-    try opts.parseSlice(argv[0..]);
+    var argv1 = [_][]const u8{ "move", "-x=10", "-y", "20" };
+    try opts.parseSlice(argv1[0..]);
 
-    if (opts.getCommand(Cmd)) |cmd| {
+    if (opts.getCommand()) |cmd| {
         switch (cmd) {
             .Move => {
                 expectEqualStrings(move_cfg.x, "10");
                 expectEqualStrings(move_cfg.y, "20");
             },
-            .Turn => unreachable,
+            .Turn => @panic("Found turn!"),
         }
     } else {
-        unreachable;
+        @panic("No subcommands were run!");
     }
+
+    var argv2 = [_][]const u8{ "turn", "--angle", "270" };
+    try opts.parseSlice(argv2[0..]);
+
+    if (opts.getCommand()) |cmd| switch (cmd) {
+        .Move => @panic("Found move!"),
+        .Turn => {
+            expectEqualStrings(turn_cfg.angle, "270");
+        },
+    } else {
+        @panic("No subcommands were run!");
+    }
+
+    var argv3 = [_][]const u8{ "no", "subcommand", "specified" };
+    try opts.parseSlice(argv3[0..]);
+
+    if (opts.getCommand()) |cmd| {
+        std.debug.print("11111 {}\n", .{cmd});
+        @panic("No subcommand was specified!");
+    } else {}
 }
