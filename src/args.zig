@@ -17,10 +17,10 @@ const FlagConf = struct {
     },
 };
 
-pub const Args = FullOpts(void); // Simple non-subcommand-using option parsing
+pub const Args = CmdArgs(void); // Simple non-subcommand-using option parsing
 
 // Option parsing that allows for subcommands (just pass the enum type to construct)
-pub fn FullOpts(comptime CommandEnumT: type) type {
+pub fn CmdArgs(comptime CommandEnumT: type) type {
     const SubCommand = struct {
         name: []const u8,
         cmd: CommandEnumT, // No more than 2^32 subcommands...
@@ -109,6 +109,9 @@ pub fn FullOpts(comptime CommandEnumT: type) type {
 
         // For right now, we don't support subcommands of subcommands.
         pub fn command(self: *Self, name: []const u8, cmd: CommandEnumT) !*Args {
+            if (CommandEnumT == void) {
+                @compileError("Subcommands not allowed against a void command type. Use `CmdArgs` to get this functionality!!");
+            }
             try self.subcommands.append(SubCommand{
                 .name = name,
                 .cmd = cmd,
@@ -118,6 +121,9 @@ pub fn FullOpts(comptime CommandEnumT: type) type {
         }
 
         pub fn getCommand(self: *Self) ?CommandEnumT {
+            if (CommandEnumT == void) {
+                @compileError("Subcommands not allowed against a void command type. Use `CmdArgs` to get this functionality!");
+            }
             return self.command_used;
         }
 
@@ -698,7 +704,7 @@ test "Basic SubCommands" {
         Turn,
     };
 
-    var opts = FullOpts(Cmd).init(std.testing.allocator);
+    var opts = CmdArgs(Cmd).init(std.testing.allocator);
     defer opts.deinit();
 
     const MoveCfg = struct {
