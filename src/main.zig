@@ -31,8 +31,8 @@ pub fn main() !void {
     var args = Args.init(allocator);
     defer args.deinit();
 
-    try args.boolFlag("color", 'c', &cfg.use_color, "Enable use of color (defaults to isatty)");
-    try args.boolFlag("files", 'f', &cfg.files_only, "Only print files");
+    try args.flag("color", 'c', &cfg.use_color, "Enable use of color (defaults to isatty)");
+    try args.flag("files", 'f', &cfg.files_only, "Only print files");
     try args.parse();
 
     var proc = Proc(@TypeOf(writer)).init(allocator, cfg, &writer);
