@@ -5,6 +5,135 @@
 // TODO: number types?
 const std = @import("std");
 
+const expect = std.testing.expect;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;
+
+fn contains(comptime T: type, needle: []const T, haystack: [][]const T) bool {
+    for (haystack) |hay| {
+        if (std.mem.eql(T, needle, hay)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+fn truthValue(val: []const u8) !bool {
+    var truly: [5][]const u8 = .{ "true", "yes", "on", "y", "1" };
+    var falsy: [5][]const u8 = .{ "false", "no", "off", "n", "0" };
+
+    if (contains(u8, val, truly[0..])) {
+        return true;
+    }
+
+    if (contains(u8, val, falsy[0..])) {
+        return false;
+    }
+
+    return error.ParseError;
+}
+
+const FlagPtr = struct {
+    ptr: usize,
+    conv_fn: ConvFn,
+
+    const ConvFn = fn (ptr: usize, value: []const u8) error{ParseError}!void;
+};
+
+fn flagConv(ptr: anytype) FlagPtr {
+    const T: type = @typeInfo(@TypeOf(ptr)).Pointer.child;
+
+    const impl = struct {
+        fn convert(p: usize, value: []const u8) error{ParseError}!void {
+
+            // If T is an optional, we need to get at the underlying type for
+            // the below conversions. Define a type C to inspect this.
+
+            const C: type = switch (@typeInfo(T)) {
+                .Optional => @typeInfo(T).Optional.child,
+                else => T,
+            };
+            comptime var info = @typeInfo(C);
+
+            var real_ptr: *T = @intToPtr(*T, p);
+
+            switch (info) {
+                .Int => switch (info.Int.signedness) {
+                    .signed => {
+                        real_ptr.* = std.fmt.parseInt(C, value, 10) catch return error.ParseError;
+                    },
+                    .unsigned => {
+                        real_ptr.* = std.fmt.parseUnsigned(C, value, 10) catch return error.ParseError;
+                    },
+                },
+                .Bool => {
+                    real_ptr.* = try truthValue(value);
+                },
+                .Pointer => {
+                    const is_const_u8_slice =
+                        info.Pointer.size == .Slice and info.Pointer.child == u8 and info.Pointer.is_const;
+
+                    if (is_const_u8_slice) {
+                        real_ptr.* = value;
+                    } else {
+                        @compileError("Unsupported flag type: " ++ @typeName(T));
+                    }
+                },
+                else => {
+                    @compileError("Unsupported flag type: " ++ @typeName(T));
+                },
+            }
+        }
+    };
+
+    return .{
+        .ptr = @ptrToInt(ptr),
+        .conv_fn = impl.convert,
+    };
+}
+
+test "Typed/Generic flag conversion functionality" {
+    var flag0: u32 = 0;
+    var flag1: i7 = 0;
+    var flag2: bool = false;
+    var flag3: []const u8 = "fail";
+
+    var flag4: ?bool = null;
+    var flag5: ?u64 = null;
+    var flag6: ?i63 = null;
+    var flag7: ?[]const u8 = "fail";
+
+    const converters = [_]FlagPtr{
+        flagConv(&flag0),
+        flagConv(&flag1),
+        flagConv(&flag2),
+        flagConv(&flag3),
+        flagConv(&flag4),
+        flagConv(&flag5),
+        flagConv(&flag6),
+        flagConv(&flag7),
+    };
+
+    try converters[0].conv_fn(converters[0].ptr, "1234");
+    try converters[1].conv_fn(converters[1].ptr, "43");
+    try converters[2].conv_fn(converters[2].ptr, "true");
+    try converters[3].conv_fn(converters[3].ptr, "pass");
+    try converters[4].conv_fn(converters[4].ptr, "true");
+    try converters[5].conv_fn(converters[5].ptr, "123456");
+    try converters[6].conv_fn(converters[6].ptr, "434343");
+    try converters[7].conv_fn(converters[7].ptr, "pass");
+
+    expect(flag0 == 1234);
+    expect(flag1 == 43);
+    expect(flag2);
+    expectEqualStrings("pass", flag3);
+    expect(flag4.?);
+    expect(flag5.? == 123456);
+    expect(flag6.? == 434343);
+    expectEqualStrings("pass", flag7.?);
+}
+
 const FlagConf = struct {
     long_name: ?[]const u8,
     short_name: ?u8,
@@ -280,16 +409,6 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             return null;
         }
 
-        fn contains(comptime T: type, needle: []const T, haystack: [][]const T) bool {
-            for (haystack) |hay| {
-                if (std.mem.eql(T, needle, hay)) {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
         fn toTruthy(val: []const u8) !bool {
             var truly: [5][]const u8 = .{ "true", "yes", "on", "y", "1" };
             var falsy: [5][]const u8 = .{ "false", "no", "off", "n", "0" };
@@ -432,10 +551,6 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
         }
     };
 }
-
-const expect = std.testing.expect;
-const expectEqualStrings = std.testing.expectEqualStrings;
-const expectError = std.testing.expectError;
 
 test "anyflag" {
     var args = Args.init(std.testing.allocator);
