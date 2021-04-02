@@ -138,12 +138,8 @@ const FlagConf = struct {
     long_name: ?[]const u8,
     short_name: ?u8,
     description: []const u8,
-    val_ptr: union(enum) {
-        OptBoolFlag: *?bool,
-        BoolFlag: *bool,
-        OptFlag: *?[]const u8,
-        Flag: *[]const u8,
-    },
+    flag_type: enum { Bool, Str }, // Different rules for how values are extracted
+    val_ptr: FlagPtr,
 };
 
 pub const Args = CmdArgs(void); // Simple non-subcommand-using option parsing
@@ -200,57 +196,14 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             self.subcommands.deinit();
         }
 
-        fn boolFlag(self: *Self, long: ?[]const u8, short: ?u8, ptr: *bool, desc: []const u8) !void {
-            try self.flags.append(FlagConf{
-                .long_name = long,
-                .short_name = short,
-                .description = desc,
-                .val_ptr = .{ .BoolFlag = ptr },
-            });
-        }
-
-        fn boolFlagOpt(self: *Self, long: ?[]const u8, short: ?u8, ptr: *?bool, desc: []const u8) !void {
-            try self.flags.append(FlagConf{
-                .long_name = long,
-                .short_name = short,
-                .description = desc,
-                .val_ptr = .{ .OptBoolFlag = ptr },
-            });
-        }
-
-        fn stringFlag(self: *Self, long: ?[]const u8, short: ?u8, ptr: *[]const u8, desc: []const u8) !void {
-            try self.flags.append(FlagConf{
-                .long_name = long,
-                .short_name = short,
-                .description = desc,
-                .val_ptr = .{ .Flag = ptr },
-            });
-        }
-
-        fn stringFlagOpt(self: *Self, long: ?[]const u8, short: ?u8, ptr: *?[]const u8, desc: []const u8) !void {
-            try self.flags.append(FlagConf{
-                .long_name = long,
-                .short_name = short,
-                .description = desc,
-                .val_ptr = .{ .OptFlag = ptr },
-            });
-        }
-
-        // TODO: Not sure if I like this; it might be a little too fancy
-        //       compared to something like "boolFlag(...)" and
-        //       "boolFlagOpt(...)". Keeping for now, though.
         pub fn flag(self: *Self, long: ?[]const u8, short: ?u8, ptr: anytype, desc: []const u8) !void {
-            if (@TypeOf(ptr) == *bool) {
-                try self.boolFlag(long, short, ptr, desc);
-            } else if (@TypeOf(ptr) == *?bool) {
-                try self.boolFlagOpt(long, short, ptr, desc);
-            } else if (@TypeOf(ptr) == *[]const u8) {
-                try self.stringFlag(long, short, ptr, desc);
-            } else if (@TypeOf(ptr) == *?[]const u8) {
-                try self.stringFlagOpt(long, short, ptr, desc);
-            } else {
-                @compileError("Unsupported ptr type " ++ @typeName(@TypeOf(ptr)));
-            }
+            try self.flags.append(.{
+                .long_name = long,
+                .short_name = short,
+                .description = desc,
+                .flag_type = if (@TypeOf(ptr) == *bool or @TypeOf(ptr) == *?bool) .Bool else .Str,
+                .val_ptr = flagConv(ptr),
+            });
         }
 
         // For right now, we don't support subcommands of subcommands.
@@ -430,24 +383,19 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
 
             var action_taken: Action = undefined;
 
-            switch (arg.val_ptr) {
-                .BoolFlag => |ptr| {
+            const ptr = arg.val_ptr.ptr;
+            const conv_fn = arg.val_ptr.conv_fn;
+
+            switch (arg.flag_type) {
+                .Bool => {
                     action_taken = Action.ContinueToNextToken;
                     if (extractEqualValue(token)) |value| {
-                        ptr.* = try toTruthy(value);
+                        try conv_fn(ptr, value);
                     } else {
-                        ptr.* = true;
+                        try conv_fn(ptr, "true");
                     }
                 },
-                .OptBoolFlag => |ptr| {
-                    action_taken = Action.ContinueToNextToken;
-                    if (extractEqualValue(token)) |value| {
-                        ptr.* = try toTruthy(value);
-                    } else {
-                        ptr.* = true;
-                    }
-                },
-                .Flag => |ptr| {
+                .Str => {
                     var value: []const u8 = undefined;
 
                     if (extractEqualValue(token)) |v| {
@@ -456,28 +404,18 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                     } else if (extractNextValue(remainder)) |v| {
                         action_taken = Action.SkipNextToken;
                         value = v;
-                    } else return error.ParseError; // missing string value
+                    } else return error.ParseError; // missing a string value
 
+                    // We want our own, backing copy of the value...
                     const value_copy = try self.allocator.dupe(u8, value);
                     errdefer self.allocator.free(value_copy);
-                    try self.values.append(value_copy); // Track this string to free on deinit
-                    ptr.* = value_copy;
-                },
-                .OptFlag => |ptr| {
-                    var value: []const u8 = undefined;
 
-                    if (extractEqualValue(token)) |v| {
-                        action_taken = Action.ContinueToNextToken;
-                        value = v;
-                    } else if (extractNextValue(remainder)) |v| {
-                        action_taken = Action.SkipNextToken;
-                        value = v;
-                    } else return error.ParseError; // missing string value
+                    // Remember this value so we can free it on deinit()
+                    try self.values.append(value_copy);
+                    errdefer _ = self.values.pop();
 
-                    const value_copy = try self.allocator.dupe(u8, value);
-                    errdefer self.allocator.free(value_copy);
-                    try self.values.append(value_copy); // Track this string to free on deinit
-                    ptr.* = value_copy;
+                    // Attempt the conversion
+                    try conv_fn(ptr, value_copy);
                 },
             }
 
@@ -490,26 +428,20 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
 
             var action_taken: Action = undefined;
 
-            switch (arg.val_ptr) {
-                .BoolFlag => |ptr| {
+            const ptr = arg.val_ptr.ptr;
+            const conv_fn = arg.val_ptr.conv_fn;
+
+            switch (arg.flag_type) {
+                .Bool => {
                     if (token.len > 1 and token[1] == '=') {
                         action_taken = Action.ContinueToNextToken; // didn't use any of the remainder
-                        ptr.* = try toTruthy(token[2..]);
+                        try conv_fn(ptr, token[2..]);
                     } else {
                         action_taken = Action.AdvanceOneCharacter;
-                        ptr.* = true;
+                        try conv_fn(ptr, "true");
                     }
                 },
-                .OptBoolFlag => |ptr| {
-                    if (token.len > 1 and token[1] == '=') {
-                        action_taken = Action.ContinueToNextToken; // didn't use any of the remainder
-                        ptr.* = try toTruthy(token[2..]);
-                    } else {
-                        action_taken = Action.AdvanceOneCharacter;
-                        ptr.* = true;
-                    }
-                },
-                .Flag => |ptr| {
+                .Str => {
                     var value: []const u8 = undefined;
 
                     if (token.len > 1 and token[1] == '=') {
@@ -518,32 +450,18 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                     } else if (extractNextValue(remainder)) |v| {
                         action_taken = Action.SkipNextToken;
                         value = v;
-                    } else {
-                        return error.ParseError; // missing string value
-                    }
+                    } else return error.ParseError; // missing string value
 
+                    // We want our own, backing copy of the value...
                     const value_copy = try self.allocator.dupe(u8, value);
                     errdefer self.allocator.free(value_copy);
-                    try self.values.append(value_copy);
-                    ptr.* = value_copy;
-                },
-                .OptFlag => |ptr| {
-                    var value: []const u8 = undefined;
 
-                    if (token.len > 1 and token[1] == '=') {
-                        action_taken = Action.ContinueToNextToken;
-                        value = token[2..];
-                    } else if (extractNextValue(remainder)) |v| {
-                        action_taken = Action.SkipNextToken;
-                        value = v;
-                    } else {
-                        return error.ParseError; // missing string value
-                    }
-
-                    const value_copy = try self.allocator.dupe(u8, value);
-                    errdefer self.allocator.free(value_copy);
+                    // Remember this value so we can free it on deinit()
                     try self.values.append(value_copy);
-                    ptr.* = value_copy;
+                    errdefer _ = self.values.pop();
+
+                    // Attempt the conversion
+                    try conv_fn(ptr, value_copy);
                 },
             }
 
