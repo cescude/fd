@@ -2,7 +2,6 @@
 // TODO: testing positionals
 // TODO: friendly error strings to go along with the unfriendly error tags
 // TODO: documentation
-// TODO: number types?
 const std = @import("std");
 
 const expect = std.testing.expect;
@@ -134,11 +133,16 @@ test "Typed/Generic flag conversion functionality" {
     expectEqualStrings("pass", flag7.?);
 }
 
-const FlagConf = struct {
+const FlagDefinition = struct {
     long_name: ?[]const u8,
     short_name: ?u8,
     description: []const u8,
-    flag_type: enum { Bool, Str }, // Different rules for how values are extracted
+    // There's different parsing rules if this is a bool vs string (bools can
+    // omit an equals value, and can't be assigned by a token in the next
+    // position,
+    //
+    // Eg: "--bool_flag" and "--bool_flag=true" but not "--bool_flag true")
+    flag_type: enum { Bool, Str },
     val_ptr: FlagPtr,
 };
 
@@ -158,7 +162,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
         values: std.ArrayList([]const u8), // Backing array for string arguments
         positionals: std.ArrayList([]const u8), // Backing array for positional arguments
 
-        flags: std.ArrayList(FlagConf), // List of argument patterns
+        flags: std.ArrayList(FlagDefinition), // List of argument patterns
         subcommands: std.ArrayList(SubCommand), // Allow to switch into namespaced command args
         command_used: ?CommandEnumT,
 
@@ -171,7 +175,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                 .allocator = allocator,
                 .values = std.ArrayList([]const u8).init(allocator),
                 .positionals = std.ArrayList([]const u8).init(allocator),
-                .flags = std.ArrayList(FlagConf).init(allocator),
+                .flags = std.ArrayList(FlagDefinition).init(allocator),
                 .subcommands = std.ArrayList(SubCommand).init(allocator),
                 .command_used = null,
             };
@@ -338,7 +342,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             }
         }
 
-        fn getFlagByLongName(args: []FlagConf, name: []const u8) ?FlagConf {
+        fn getFlagByLongName(args: []FlagDefinition, name: []const u8) ?FlagDefinition {
             for (args) |arg| {
                 if (arg.long_name) |long_name| {
                     if (std.mem.eql(u8, long_name, name)) {
@@ -350,7 +354,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             return null;
         }
 
-        fn getFlagByShortName(args: []FlagConf, name: u8) ?FlagConf {
+        fn getFlagByShortName(args: []FlagDefinition, name: u8) ?FlagDefinition {
             for (args) |arg| {
                 if (arg.short_name) |short_name| {
                     if (short_name == name) {
@@ -362,31 +366,16 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             return null;
         }
 
-        fn toTruthy(val: []const u8) !bool {
-            var truly: [5][]const u8 = .{ "true", "yes", "on", "y", "1" };
-            var falsy: [5][]const u8 = .{ "false", "no", "off", "n", "0" };
-
-            if (contains(u8, val, truly[0..])) {
-                return true;
-            }
-
-            if (contains(u8, val, falsy[0..])) {
-                return false;
-            }
-
-            return error.ParseError;
-        }
-
         fn fillLongValue(self: *Self, token: []const u8, remainder: [][]const u8) !Action {
             var name = extractName(token);
-            var arg: FlagConf = getFlagByLongName(self.flags.items, name) orelse return error.ParseError;
+            var defn: FlagDefinition = getFlagByLongName(self.flags.items, name) orelse return error.ParseError;
 
             var action_taken: Action = undefined;
 
-            const ptr = arg.val_ptr.ptr;
-            const conv_fn = arg.val_ptr.conv_fn;
+            const ptr = defn.val_ptr.ptr;
+            const conv_fn = defn.val_ptr.conv_fn;
 
-            switch (arg.flag_type) {
+            switch (defn.flag_type) {
                 .Bool => {
                     action_taken = Action.ContinueToNextToken;
                     if (extractEqualValue(token)) |value| {
@@ -424,14 +413,14 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
 
         fn fillShortValue(self: *Self, token: []const u8, remainder: [][]const u8) !Action {
             var name = token[0];
-            var arg: FlagConf = getFlagByShortName(self.flags.items, name) orelse return error.ParseError; // bad name
+            var defn: FlagDefinition = getFlagByShortName(self.flags.items, name) orelse return error.ParseError; // bad name
 
             var action_taken: Action = undefined;
 
-            const ptr = arg.val_ptr.ptr;
-            const conv_fn = arg.val_ptr.conv_fn;
+            const ptr = defn.val_ptr.ptr;
+            const conv_fn = defn.val_ptr.conv_fn;
 
-            switch (arg.flag_type) {
+            switch (defn.flag_type) {
                 .Bool => {
                     if (token.len > 1 and token[1] == '=') {
                         action_taken = Action.ContinueToNextToken; // didn't use any of the remainder
@@ -723,6 +712,47 @@ test "Various ways to set a boolean to false" {
     expect(!flag_on.?);
     expect(!flag_y.?);
     expect(!flag_1.?);
+}
+
+test "Number support" {
+    var args = Args.init(std.testing.allocator);
+    defer args.deinit();
+
+    var flag0: u1 = 0;
+    var flag1: ?u2 = null;
+    var flag2: u32 = 0;
+    var flag3: ?u64 = null;
+
+    var flag4: i2 = 0;
+    var flag5: ?i2 = null;
+    var flag6: i32 = 0;
+    var flag7: ?i64 = null;
+
+    try args.flag("flag0", null, &flag0, "");
+    try args.flag("flag1", null, &flag1, "");
+    try args.flag("flag2", null, &flag2, "");
+    try args.flag("flag3", null, &flag3, "");
+
+    try args.flag("flag4", null, &flag4, "");
+    try args.flag("flag5", null, &flag5, "");
+    try args.flag("flag6", null, &flag6, "");
+    try args.flag("flag7", null, &flag7, "");
+
+    var argv = [_][]const u8{
+        "--flag0=1",  "--flag1=1", "--flag2=300000", "--flag3=300000",
+        "--flag4=-1", "--flag5=1", "--flag6=-20",    "--flag7=-10000",
+    };
+    try args.parseSlice(argv[0..]);
+
+    expect(flag0 == 1);
+    expect(flag1.? == 1);
+    expect(flag2 == 300000);
+    expect(flag3.? == 300000);
+
+    expect(flag4 == -1);
+    expect(flag5.? == 1);
+    expect(flag6 == -20);
+    expect(flag7.? == -10000);
 }
 
 test "Mashing together short opts" {
