@@ -6,7 +6,8 @@ const sep = std.fs.path.sep_str;
 
 const Config = struct {
     use_color: bool = true,
-    files_only: bool = false,
+    print_files: bool = false,
+    print_paths: bool = false,
 };
 
 pub fn main() !void {
@@ -32,13 +33,28 @@ pub fn main() !void {
     defer args.deinit();
 
     args.summary(
-        \\Recursively lists files. It's much faster than either fd or find,
-        \\although, to be fair, it does much less.
+        \\Recursively lists files. It's much faster than either fd or find
+        \\(although, to be fair, it does much less).
     );
 
+    var show_usage: bool = false;
+
     try args.flag("color", 'c', &cfg.use_color, "Enable use of color (defaults to isatty)");
-    try args.flag("files", 'f', &cfg.files_only, "Only print files");
+    try args.flag("files", 'f', &cfg.print_files, "Only print files");
+    try args.flag("paths", 'p', &cfg.print_paths, "Only print paths");
+    try args.flag("help", 'h', &show_usage, "Display this help message");
+
     args.parse() catch args.printUsageAndDie();
+
+    if (show_usage) {
+        args.printUsageAndDie();
+    }
+
+    // If neither is selected, default to both :^(
+    if (!cfg.print_files and !cfg.print_paths) {
+        cfg.print_files = true;
+        cfg.print_paths = true;
+    }
 
     var proc = Proc(@TypeOf(writer)).init(allocator, cfg, &writer);
     try proc.run(cwd);
@@ -198,7 +214,7 @@ fn Proc(comptime WriterType: type) type {
                 };
                 defer dir.close();
 
-                if (paths.items.len > 0 and !self.cfg.files_only) {
+                if (paths.items.len > 0 and self.cfg.print_paths) {
                     try self.styled(Style.Prefix, dropRoot(root, cur_path), "\n");
                 }
 
@@ -237,26 +253,28 @@ fn Proc(comptime WriterType: type) type {
                 // Sort files a-z (since we iterate over them normally, below)
                 _ = std.sort.sort(Entry, files_found.items, {}, entryLt);
 
-                for (files_found.items) |file| {
-                    const str = dropRoot(root, file.name);
-                    const dname = std.fs.path.dirname(str);
-                    const fname = std.fs.path.basename(str);
+                if (self.cfg.print_files) {
+                    for (files_found.items) |file| {
+                        const str = dropRoot(root, file.name);
+                        const dname = std.fs.path.dirname(str);
+                        const fname = std.fs.path.basename(str);
 
-                    if (dname) |ss| {
-                        try self.styled(Style.Prefix, ss, sep);
-                    }
+                        if (dname) |ss| {
+                            try self.styled(Style.Prefix, ss, sep);
+                        }
 
-                    switch (file.kind) {
-                        .Directory => unreachable,
-                        .File => {
-                            try self.styled(Style.Default, fname, "\n");
-                        },
-                        .SymLink => {
-                            try self.styled(Style.SymLink, fname, "\n");
-                        },
-                        else => {
-                            try self.styled(Style.Unknown, fname, "\n");
-                        },
+                        switch (file.kind) {
+                            .Directory => unreachable,
+                            .File => {
+                                try self.styled(Style.Default, fname, "\n");
+                            },
+                            .SymLink => {
+                                try self.styled(Style.SymLink, fname, "\n");
+                            },
+                            else => {
+                                try self.styled(Style.Unknown, fname, "\n");
+                            },
+                        }
                     }
                 }
             }
