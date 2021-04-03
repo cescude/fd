@@ -1,5 +1,5 @@
 // TODO: help strings
-// TODO: testing positionals
+// TODO: implement array-like options (eg. -e one -e two -e three becomes .{"one","two","three"})
 // TODO: friendly error strings to go along with the unfriendly error tags
 // TODO: documentation
 const std = @import("std");
@@ -146,21 +146,69 @@ const FlagDefinition = struct {
     val_ptr: FlagPtr,
 };
 
+fn extractName(token: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, token, "=")) |idx| {
+        return token[0..idx];
+    } else {
+        return token;
+    }
+}
+
+fn extractEqualValue(token: []const u8) ?[]const u8 {
+    if (std.mem.indexOf(u8, token, "=")) |idx| {
+        return token[idx + 1 ..];
+    } else {
+        return null;
+    }
+}
+
+fn extractNextValue(remainder: [][]const u8) ?[]const u8 {
+    if (remainder.len > 0 and !std.mem.startsWith(u8, remainder[0], "-")) {
+        return remainder[0];
+    } else {
+        return null;
+    }
+}
+
+fn getFlagByLongName(flags: []FlagDefinition, flag_name: []const u8) ?FlagDefinition {
+    for (flags) |flag| {
+        if (flag.long_name) |long_name| {
+            if (std.mem.eql(u8, long_name, flag_name)) {
+                return flag;
+            }
+        }
+    }
+
+    return null;
+}
+
+fn getFlagByShortName(flags: []FlagDefinition, flag_name: u8) ?FlagDefinition {
+    for (flags) |flag| {
+        if (flag.short_name) |short_name| {
+            if (short_name == flag_name) {
+                return flag;
+            }
+        }
+    }
+
+    return null;
+}
+
 pub const Args = CmdArgs(void); // Simple non-subcommand-using option parsing
 
 // Option parsing that allows for subcommands (just pass the enum type to construct)
 pub fn CmdArgs(comptime CommandEnumT: type) type {
-    const SubCommand = struct {
-        name: []const u8,
-        cmd: CommandEnumT, // No more than 2^32 subcommands...
-        args: Args,
-    };
-
     return struct {
         allocator: *std.mem.Allocator,
 
+        program_name: ?[]const u8 = null,
+        program_summary: ?[]const u8 = null,
+
         values: std.ArrayList([]const u8), // Backing array for string arguments
+
         positionals: std.ArrayList([]const u8), // Backing array for positional arguments
+        positional_name: ?[]const u8 = null, // Name for positionals, used in help messages
+        positional_ptr: ?*[][]const u8 = null, // Ptr to retrieve the positional array
 
         flags: std.ArrayList(FlagDefinition), // List of argument patterns
         subcommands: std.ArrayList(SubCommand), // Allow to switch into namespaced command args
@@ -169,6 +217,12 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
         const Self = @This();
 
         const Error = error{ ParseError, OutOfMemory };
+
+        const SubCommand = struct {
+            name: []const u8,
+            cmd: CommandEnumT,
+            args: Args,
+        };
 
         pub fn init(allocator: *std.mem.Allocator) Self {
             return .{
@@ -200,23 +254,101 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             self.subcommands.deinit();
         }
 
-        pub fn flag(self: *Self, long: ?[]const u8, short: ?u8, ptr: anytype, desc: []const u8) !void {
+        pub fn printUsageAndDie(self: *Self) noreturn {
+            if (self.program_name) |program_name| {
+                std.debug.print("usage: {s} ", .{program_name});
+            } else {
+                std.debug.print("usage: TODO ", .{});
+            }
+
+            if (self.flags.items.len > 0) {
+                std.debug.print("[OPTIONS]... ", .{});
+            }
+
+            if (self.positional_ptr) |_| {
+                if (self.positional_name) |positional_name| {
+                    std.debug.print("[{s}]...", .{self.positional_name.?});
+                } else {
+                    std.debug.print("...", .{});
+                }
+            }
+
+            std.debug.print("\n", .{});
+
+            if (self.program_summary) |program_summary| {
+                std.debug.print("{s}\n\n", .{program_summary});
+            } else {
+                std.debug.print("\n", .{});
+            }
+
+            for (self.flags.items) |flag_defn| {
+                switch (flag_defn.flag_type) {
+                    .Bool => {
+                        if (flag_defn.short_name) |short_name| {
+                            std.debug.print("   -{c}", .{short_name});
+                            if (flag_defn.long_name == null) {
+                                std.debug.print("  ", .{});
+                            } else {
+                                std.debug.print(", ", .{});
+                            }
+                        } else std.debug.print("     ", .{});
+
+                        if (flag_defn.long_name) |long_name| {
+                            std.debug.print("--{s: <20}", .{long_name});
+                        } else std.debug.print(" " ** 22, .{});
+
+                        // TODO: word wrap
+                        std.debug.print("{s}\n", .{flag_defn.description});
+                    },
+                    .Str => {},
+                }
+            }
+            std.process.exit(1);
+        }
+
+        /// Configure the name for this program. This only affects "usage"
+        /// output; TODO: if omitted, this will be taken from the first argv.
+        pub fn name(self: *Self, program_name: []const u8) void {
+            self.program_name = program_name;
+        }
+
+        /// Configure a usage summary for this program. This is a summary
+        /// paragraph that follows the program name in the help text.
+        pub fn summary(self: *Self, program_summary: []const u8) void {
+            self.program_summary = program_summary;
+        }
+
+        /// Configure a commandline flag, as well as provide a memory location
+        /// to store the result.
+        ///
+        /// Note that `ptr` can refer to a boolean, signed/unsigned integer, a
+        /// []const u8 string, or an optional of any of the prior types.
+        ///
+        /// Boolean flags have slightly different parsing rules from
+        /// string/value flags.
+        pub fn flag(self: *Self, long_name: ?[]const u8, short_name: ?u8, ptr: anytype, description: []const u8) !void {
             try self.flags.append(.{
-                .long_name = long,
-                .short_name = short,
-                .description = desc,
+                .long_name = long_name,
+                .short_name = short_name,
+                .description = description,
                 .flag_type = if (@TypeOf(ptr) == *bool or @TypeOf(ptr) == *?bool) .Bool else .Str,
                 .val_ptr = flagConv(ptr),
             });
         }
 
+        /// Name and bind the non-flag commandline arguments
+        pub fn args(self: *Self, positional_name: []const u8, ptr: *[][]const u8) !void {
+            self.positional_name = positional_name;
+            self.positional_ptr = ptr;
+        }
+
         // For right now, we don't support subcommands of subcommands.
-        pub fn command(self: *Self, name: []const u8, cmd: CommandEnumT) !*Args {
+        pub fn command(self: *Self, command_name: []const u8, cmd: CommandEnumT) !*Args {
             if (CommandEnumT == void) {
                 @compileError("Subcommands not allowed against a void command type. Use `CmdArgs` to get this functionality!!");
             }
             try self.subcommands.append(SubCommand{
-                .name = name,
+                .name = command_name,
                 .cmd = cmd,
                 .args = Args.init(self.allocator),
             });
@@ -228,11 +360,6 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                 @compileError("Subcommands not allowed against a void command type. Use `CmdArgs` to get this functionality!");
             }
             return self.command_used;
-        }
-
-        // TODO: add test case
-        pub fn positionals(self: *Self) [][]const u8 {
-            return self.positionals.items;
         }
 
         pub fn parse(self: *Self) !void {
@@ -252,7 +379,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             self.command_used = null;
 
             var idx: usize = 0;
-            while (idx < argv.len) : (idx += 1) {
+            outer: while (idx < argv.len) : (idx += 1) {
                 var token = argv[idx];
 
                 if (no_more_flags) {
@@ -298,7 +425,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                                 if (std.mem.eql(u8, sub_cmd.name, token)) {
                                     self.command_used = sub_cmd.cmd;
                                     try sub_cmd.args.parseSlice(argv[idx + 1 ..]);
-                                    return;
+                                    break :outer;
                                 }
                             } else {
 
@@ -312,63 +439,19 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                     }
                 }
             }
+
+            if (self.positional_ptr) |posns| {
+                posns.* = self.positionals.items;
+            }
         }
 
         fn addPositional(self: *Self, value: []const u8) !void {
             try self.positionals.append(try self.allocator.dupe(u8, value));
         }
 
-        fn extractName(token: []const u8) []const u8 {
-            if (std.mem.indexOf(u8, token, "=")) |idx| {
-                return token[0..idx];
-            } else {
-                return token;
-            }
-        }
-
-        fn extractEqualValue(token: []const u8) ?[]const u8 {
-            if (std.mem.indexOf(u8, token, "=")) |idx| {
-                return token[idx + 1 ..];
-            } else {
-                return null;
-            }
-        }
-
-        fn extractNextValue(remainder: [][]const u8) ?[]const u8 {
-            if (remainder.len > 0 and !std.mem.startsWith(u8, remainder[0], "-")) {
-                return remainder[0];
-            } else {
-                return null;
-            }
-        }
-
-        fn getFlagByLongName(args: []FlagDefinition, name: []const u8) ?FlagDefinition {
-            for (args) |arg| {
-                if (arg.long_name) |long_name| {
-                    if (std.mem.eql(u8, long_name, name)) {
-                        return arg;
-                    }
-                }
-            }
-
-            return null;
-        }
-
-        fn getFlagByShortName(args: []FlagDefinition, name: u8) ?FlagDefinition {
-            for (args) |arg| {
-                if (arg.short_name) |short_name| {
-                    if (short_name == name) {
-                        return arg;
-                    }
-                }
-            }
-
-            return null;
-        }
-
         fn fillLongValue(self: *Self, token: []const u8, remainder: [][]const u8) !Action {
-            var name = extractName(token);
-            var defn: FlagDefinition = getFlagByLongName(self.flags.items, name) orelse return error.ParseError;
+            var flag_name = extractName(token);
+            var defn: FlagDefinition = getFlagByLongName(self.flags.items, flag_name) orelse return error.ParseError;
 
             var action_taken: Action = undefined;
 
@@ -412,8 +495,8 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
         }
 
         fn fillShortValue(self: *Self, token: []const u8, remainder: [][]const u8) !Action {
-            var name = token[0];
-            var defn: FlagDefinition = getFlagByShortName(self.flags.items, name) orelse return error.ParseError; // bad name
+            var flag_name = token[0];
+            var defn: FlagDefinition = getFlagByShortName(self.flags.items, flag_name) orelse return error.ParseError; // bad name
 
             var action_taken: Action = undefined;
 
@@ -800,6 +883,28 @@ test "Mashing together short opts" {
 
     expect(flag_h.?);
     expectEqualStrings("pass", flag_i.?);
+}
+
+test "Positional functionality" {
+    var args = Args.init(std.testing.allocator);
+    defer args.deinit();
+
+    var flag0: bool = false;
+    var flag1: u16 = 0;
+    var files: [][]const u8 = undefined;
+
+    try args.flag("flag0", null, &flag0, "");
+    try args.flag("flag1", null, &flag1, "");
+    try args.args("FILE", &files);
+
+    var argv = [_][]const u8{ "one.txt", "--flag0", "--flag1", "1234", "two.txt" };
+    try args.parseSlice(argv[0..]);
+
+    expect(flag0);
+    expect(flag1 == 1234);
+    expect(files.len == 2);
+    expectEqualStrings("one.txt", files[0]);
+    expectEqualStrings("two.txt", files[1]);
 }
 
 test "Basic SubCommands" {

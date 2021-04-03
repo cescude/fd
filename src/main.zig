@@ -31,9 +31,15 @@ pub fn main() !void {
     var args = Args.init(allocator);
     defer args.deinit();
 
+    args.name("fd");
+    args.summary(
+        \\Recursively lists files. It's much faster than either fd or find, although,
+        \\to be fair, it does _much_ less.
+    );
+
     try args.flag("color", 'c', &cfg.use_color, "Enable use of color (defaults to isatty)");
     try args.flag("files", 'f', &cfg.files_only, "Only print files");
-    try args.parse();
+    args.parse() catch args.printUsageAndDie();
 
     var proc = Proc(@TypeOf(writer)).init(allocator, cfg, &writer);
     try proc.run(cwd);
