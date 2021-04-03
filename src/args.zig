@@ -1,4 +1,5 @@
 // TODO: help strings
+// TODO: make sure any strings going in get duplicated?
 // TODO: implement array-like options (eg. -e one -e two -e three becomes .{"one","two","three"})
 // TODO: friendly error strings to go along with the unfriendly error tags
 // TODO: documentation
@@ -464,7 +465,15 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
         pub fn parse(self: *Self) !void {
             var argv = try std.process.argsAlloc(self.allocator);
             defer std.process.argsFree(self.allocator, argv);
-            try self.parseSlice(argv[0..]);
+            if (self.program_name == null) {
+                const basename = try self.allocator.dupe(u8, std.fs.path.basename(argv[0]));
+                errdefer self.allocator.free(basename); // TODO: Assuming this scope is just the current block
+
+                // So it'll get free'd on deinit()
+                try self.values.append(basename);
+                self.program_name = self.values.items[self.values.items.len - 1];
+            }
+            try self.parseSlice(argv[1..]);
         }
 
         const Action = enum {
