@@ -33,8 +33,8 @@ pub fn main() !void {
 
     args.name("fd");
     args.summary(
-        \\Recursively lists files. It's much faster than either fd or find, although,
-        \\to be fair, it does _much_ less.
+        \\Recursively lists files. It's much faster than either fd or find,
+        \\although, to be fair, it does much less.
     );
 
     try args.flag("color", 'c', &cfg.use_color, "Enable use of color (defaults to isatty)");

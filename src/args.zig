@@ -2,11 +2,86 @@
 // TODO: implement array-like options (eg. -e one -e two -e three becomes .{"one","two","three"})
 // TODO: friendly error strings to go along with the unfriendly error tags
 // TODO: documentation
+// TODO: ascii whitespace? what's the utf8 story here?
 const std = @import("std");
 
 const expect = std.testing.expect;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expectError = std.testing.expectError;
+
+const max_width: usize = 80;
+
+/// Iterator that wraps text around a certain column length;
+const ReflowTextIterator = struct {
+    allocator: *std.mem.Allocator,
+    current_line: std.ArrayList(u8),
+    token_iterator: std.mem.TokenIterator,
+    width: usize,
+    token: ?[]const u8,
+
+    const Self = @This();
+
+    pub fn init(a: *std.mem.Allocator, text: []const u8, width: usize) Self {
+        return .{
+            .allocator = a,
+            .current_line = std.ArrayList(u8).init(a),
+            .token_iterator = std.mem.tokenize(text, " \t\r\n"),
+            .width = width,
+            .token = null,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.current_line.deinit();
+    }
+
+    pub fn next(self: *Self) !?[]const u8 {
+        self.current_line.deinit();
+        self.current_line = std.ArrayList(u8).init(self.allocator);
+
+        var line = &self.current_line;
+
+        while (true) {
+            if (self.token == null) {
+                self.token = self.token_iterator.next();
+            }
+
+            if (self.token) |word| {
+                if (line.items.len == 0 and word.len > self.width) {
+                    try line.appendSlice(word); // Just return the single word
+                    self.token = null;
+                    return line.items;
+                } else if (line.items.len + word.len + 1 > self.width) {
+                    return line.items;
+                } else {
+                    if (line.items.len > 0) {
+                        try line.append(' ');
+                    }
+                    try line.appendSlice(word);
+                    self.token = null;
+                }
+            } else break;
+        }
+
+        return if (line.items.len > 0) line.items else null;
+    }
+};
+
+test "Reflow paragraph text" {
+    var text =
+        \\One two three four five six seven eight nine ten eleven twelve thirteen
+        \\fourteen fifteen sixteen seventeen eighteen nineteen AND tweeeeenty!
+    ;
+
+    var iter = ReflowTextIterator.init(std.testing.allocator, text, 40);
+    defer iter.deinit();
+
+    std.debug.print("\n", .{});
+    while (try iter.next()) |line| {
+        std.debug.print(">>{d: >5} {s}\n", .{ line.len, line });
+        expect(line.len <= 40);
+    }
+}
 
 fn contains(comptime T: type, needle: []const T, haystack: [][]const T) bool {
     for (haystack) |hay| {
@@ -276,9 +351,18 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             std.debug.print("\n", .{});
 
             if (self.program_summary) |program_summary| {
-                std.debug.print("{s}\n\n", .{program_summary});
+                var iter = ReflowTextIterator.init(self.allocator, program_summary, max_width);
+                defer iter.deinit();
+
+                while (iter.next() catch null) |line| {
+                    std.debug.print("{s}\n", .{line});
+                }
             } else {
                 std.debug.print("\n", .{});
+            }
+            std.debug.print("\n", .{});
+            if (self.flags.items.len > 0) {
+                std.debug.print("OPTIONS\n", .{});
             }
 
             for (self.flags.items) |flag_defn| {
@@ -297,8 +381,18 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                             std.debug.print("--{s: <20}", .{long_name});
                         } else std.debug.print(" " ** 22, .{});
 
-                        // TODO: word wrap
-                        std.debug.print("{s}\n", .{flag_defn.description});
+                        var iter = ReflowTextIterator.init(self.allocator, flag_defn.description, max_width - 29);
+                        defer iter.deinit();
+
+                        var first_line = true;
+                        while (iter.next() catch null) |line| {
+                            if (first_line) {
+                                first_line = false;
+                            } else {
+                                std.debug.print(" " ** 29, .{});
+                            }
+                            std.debug.print("{s}\n", .{line});
+                        }
                     },
                     .Str => {},
                 }
