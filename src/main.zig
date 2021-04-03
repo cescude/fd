@@ -31,7 +31,6 @@ pub fn main() !void {
     var args = Args.init(allocator);
     defer args.deinit();
 
-    args.name("fd");
     args.summary(
         \\Recursively lists files. It's much faster than either fd or find,
         \\although, to be fair, it does much less.
@@ -199,7 +198,7 @@ fn Proc(comptime WriterType: type) type {
                 };
                 defer dir.close();
 
-                if (paths.items.len > 0) {
+                if (paths.items.len > 0 and !self.cfg.files_only) {
                     try self.styled(Style.Prefix, dropRoot(root, cur_path), "\n");
                 }
 
