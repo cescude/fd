@@ -11,7 +11,7 @@ const expectError = std.testing.expectError;
 
 const max_width: usize = 80;
 
-/// Iterator that wraps text around a certain column length;
+/// Iterator that wraps text around the indicated column length;
 const ReflowTextIterator = struct {
     allocator: *std.mem.Allocator,
     current_line: std.ArrayList(u8),
@@ -514,7 +514,6 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                             // encountered (before a "--"), check to see if
                             // a subcommand is being referenced.
 
-                            // TODO: needs testing
                             for (self.subcommands.items) |*sub_cmd| {
                                 if (std.mem.eql(u8, sub_cmd.name, token)) {
                                     self.command_used = sub_cmd.cmd;
@@ -540,7 +539,13 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
         }
 
         fn addPositional(self: *Self, value: []const u8) !void {
-            try self.positionals.append(try self.allocator.dupe(u8, value));
+            if (self.positional_ptr) |_| {
+                try self.positionals.append(try self.allocator.dupe(u8, value));
+            } else {
+                // This hasn't been configured to accept positionals with the
+                // `args(...)` function.
+                return error.ParseError;
+            }
         }
 
         fn fillLongValue(self: *Self, token: []const u8, remainder: [][]const u8) !Action {
@@ -764,6 +769,9 @@ test "Expecting errors on bad input" {
     expectError(error.ParseError, args.parseSlice(argv[0..]));
 
     argv = [_][]const u8{"--flag0=not_right"};
+    expectError(error.ParseError, args.parseSlice(argv[0..]));
+
+    argv = [_][]const u8{"positional_argument"};
     expectError(error.ParseError, args.parseSlice(argv[0..]));
 }
 
@@ -1057,11 +1065,11 @@ test "Basic SubCommands" {
         @panic("No subcommands were run!");
     }
 
+    var args: [][]const u8 = undefined;
+    try opts.args("ARG", &args);
+
     var argv3 = [_][]const u8{ "no", "subcommand", "specified" };
     try opts.parseSlice(argv3[0..]);
 
-    if (opts.getCommand()) |cmd| {
-        std.debug.print("11111 {}\n", .{cmd});
-        @panic("No subcommand was specified!");
-    } else {}
+    expect(opts.getCommand() == null);
 }
