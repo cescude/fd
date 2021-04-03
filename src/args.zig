@@ -329,57 +329,57 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             self.subcommands.deinit();
         }
 
-        pub fn printUsageAndDie(self: *Self) noreturn {
+        pub fn printUsage(self: *Self, comptime W: type, writer: W) !void {
             if (self.program_name) |program_name| {
-                std.debug.print("usage: {s} ", .{program_name});
+                try writer.print("usage: {s} ", .{program_name});
             } else {
-                std.debug.print("usage: TODO ", .{});
+                try writer.print("usage: TODO ", .{});
             }
 
             if (self.flags.items.len > 0) {
-                std.debug.print("[OPTIONS]... ", .{});
+                try writer.print("[OPTIONS]... ", .{});
             }
 
             if (self.positional_ptr) |_| {
                 if (self.positional_name) |positional_name| {
-                    std.debug.print("[{s}]...", .{self.positional_name.?});
+                    try writer.print("[{s}]...", .{self.positional_name.?});
                 } else {
-                    std.debug.print("...", .{});
+                    try writer.print("...", .{});
                 }
             }
 
-            std.debug.print("\n", .{});
+            try writer.print("\n", .{});
 
             if (self.program_summary) |program_summary| {
                 var iter = ReflowTextIterator.init(self.allocator, program_summary, max_width);
                 defer iter.deinit();
 
                 while (iter.next() catch null) |line| {
-                    std.debug.print("{s}\n", .{line});
+                    try writer.print("{s}\n", .{line});
                 }
             } else {
-                std.debug.print("\n", .{});
+                try writer.print("\n", .{});
             }
-            std.debug.print("\n", .{});
+            try writer.print("\n", .{});
             if (self.flags.items.len > 0) {
-                std.debug.print("OPTIONS\n", .{});
+                try writer.print("OPTIONS\n", .{});
             }
 
             for (self.flags.items) |flag_defn| {
                 switch (flag_defn.flag_type) {
                     .Bool => {
                         if (flag_defn.short_name) |short_name| {
-                            std.debug.print("   -{c}", .{short_name});
+                            try writer.print("   -{c}", .{short_name});
                             if (flag_defn.long_name == null) {
-                                std.debug.print("  ", .{});
+                                try writer.print("  ", .{});
                             } else {
-                                std.debug.print(", ", .{});
+                                try writer.print(", ", .{});
                             }
-                        } else std.debug.print("     ", .{});
+                        } else try writer.print("     ", .{});
 
                         if (flag_defn.long_name) |long_name| {
-                            std.debug.print("--{s: <20}", .{long_name});
-                        } else std.debug.print(" " ** 22, .{});
+                            try writer.print("--{s: <20}", .{long_name});
+                        } else try writer.print(" " ** 22, .{});
 
                         var iter = ReflowTextIterator.init(self.allocator, flag_defn.description, max_width - 29);
                         defer iter.deinit();
@@ -389,14 +389,19 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                             if (first_line) {
                                 first_line = false;
                             } else {
-                                std.debug.print(" " ** 29, .{});
+                                try writer.print(" " ** 29, .{});
                             }
-                            std.debug.print("{s}\n", .{line});
+                            try writer.print("{s}\n", .{line});
                         }
                     },
                     .Str => {},
                 }
             }
+        }
+
+        pub fn printUsageAndDie(self: *Self) noreturn {
+            const stderr = std.io.getStdErr().writer();
+            self.printUsage(@TypeOf(stderr), stderr) catch {};
             std.process.exit(1);
         }
 
