@@ -4,6 +4,7 @@
 // TODO: friendly error strings to go along with the unfriendly error tags
 // TODO: documentation
 // TODO: ascii whitespace? what's the utf8 story here?
+// TODO: split options and flag definitions, for extra help documentation
 const std = @import("std");
 
 const expect = std.testing.expect;
@@ -113,6 +114,7 @@ const FlagPtr = struct {
     ptr: usize,
     conv_fn: ConvFn,
 
+    // TODO: string that describes the flag type? (NUM, STR, etc?
     const ConvFn = fn (ptr: usize, value: []const u8) error{ParseError}!void;
 };
 
@@ -290,6 +292,8 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
         subcommands: std.ArrayList(SubCommand), // Allow to switch into namespaced command args
         command_used: ?CommandEnumT,
 
+        last_error: ?[]const u8 = null,
+
         const Self = @This();
 
         const Error = error{ ParseError, OutOfMemory };
@@ -328,9 +332,17 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                 sub.args.deinit();
             }
             self.subcommands.deinit();
+
+            if (self.last_error) |msg| {
+                self.allocator.free(msg);
+            }
         }
 
         pub fn printUsage(self: *Self, comptime W: type, writer: W) !void {
+            if (self.last_error) |msg| {
+                try writer.print("error: {s}\n\n", .{msg});
+            }
+
             if (self.program_name) |program_name| {
                 try writer.print("usage: {s} ", .{program_name});
             } else {
@@ -368,35 +380,67 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
 
             for (self.flags.items) |flag_defn| {
                 switch (flag_defn.flag_type) {
-                    .Bool => {
-                        if (flag_defn.short_name) |short_name| {
-                            try writer.print("   -{c}", .{short_name});
-                            if (flag_defn.long_name == null) {
-                                try writer.print("  ", .{});
-                            } else {
-                                try writer.print(", ", .{});
-                            }
-                        } else try writer.print("     ", .{});
-
-                        if (flag_defn.long_name) |long_name| {
-                            try writer.print("--{s: <20}", .{long_name});
-                        } else try writer.print(" " ** 22, .{});
-
-                        var iter = ReflowTextIterator.init(self.allocator, flag_defn.description, max_width - 29);
-                        defer iter.deinit();
-
-                        var first_line = true;
-                        while (iter.next() catch null) |line| {
-                            if (first_line) {
-                                first_line = false;
-                            } else {
-                                try writer.print(" " ** 29, .{});
-                            }
-                            try writer.print("{s}\n", .{line});
-                        }
-                    },
-                    .Str => {},
+                    .Bool => try self.printBoolFlagUsage(flag_defn, W, writer),
+                    .Str => try self.printFlagUsage(flag_defn, W, writer),
                 }
+            }
+        }
+
+        fn printBoolFlagUsage(self: *Self, defn: FlagDefinition, comptime W: type, writer: W) !void {
+            var spec: []const u8 = if (defn.short_name != null and defn.long_name != null)
+                try std.fmt.allocPrint(self.allocator, "-{c}, --{s}", .{ defn.short_name.?, defn.long_name.? })
+            else if (defn.short_name) |short|
+                try std.fmt.allocPrint(self.allocator, "-{c}", .{short})
+            else if (defn.long_name) |long|
+                try std.fmt.allocPrint(self.allocator, "    --{s}", .{long})
+            else
+                unreachable; // Should have either a short or long name, no?
+            defer self.allocator.free(spec);
+
+            try writer.print("   {s: <25} ", .{spec});
+
+            var iter = ReflowTextIterator.init(self.allocator, defn.description, max_width - 29);
+            defer iter.deinit();
+
+            var first_line = true;
+            while (iter.next() catch null) |line| {
+                if (first_line) {
+                    first_line = false;
+                } else {
+                    try writer.print(" " ** 29, .{});
+                }
+                try writer.print("{s}\n", .{line});
+            }
+        }
+
+        fn printFlagUsage(self: *Self, defn: FlagDefinition, comptime W: type, writer: W) !void {
+
+            // TODO: separate flag/option definitions and let the option version
+            // specify the OPT part
+
+            var spec: []const u8 = if (defn.short_name != null and defn.long_name != null)
+                try std.fmt.allocPrint(self.allocator, "-{c}, --{s}=<opt>", .{ defn.short_name.?, defn.long_name.? })
+            else if (defn.short_name != null)
+                try std.fmt.allocPrint(self.allocator, "-{c}=<opt>", .{defn.short_name})
+            else if (defn.long_name != null)
+                try std.fmt.allocPrint(self.allocator, "    --{s}=<opt>", .{defn.long_name})
+            else
+                unreachable; // Should have either a short or long name, no?
+            defer self.allocator.free(spec);
+
+            try writer.print("   {s: <25} ", .{spec});
+
+            var iter = ReflowTextIterator.init(self.allocator, defn.description, max_width - 29);
+            defer iter.deinit();
+
+            var first_line = true;
+            while (iter.next() catch null) |line| {
+                if (first_line) {
+                    first_line = false;
+                } else {
+                    try writer.print(" " ** 29, .{});
+                }
+                try writer.print("{s}\n", .{line});
             }
         }
 
@@ -474,6 +518,14 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                 self.program_name = self.values.items[self.values.items.len - 1];
             }
             try self.parseSlice(argv[1..]);
+        }
+
+        fn setError(self: *Self, comptime fmt: []const u8, vals: anytype) !void {
+            if (self.last_error) |e| {
+                self.allocator.free(e);
+            }
+
+            self.last_error = try std.fmt.allocPrint(self.allocator, fmt, vals);
         }
 
         const Action = enum {
@@ -558,13 +610,17 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             } else {
                 // This hasn't been configured to accept positionals with the
                 // `args(...)` function.
+                try self.setError("Unrecognized argument \"{s}\"", .{value});
                 return error.ParseError;
             }
         }
 
         fn fillLongValue(self: *Self, token: []const u8, remainder: [][]const u8) !Action {
             var flag_name = extractName(token);
-            var defn: FlagDefinition = getFlagByLongName(self.flags.items, flag_name) orelse return error.ParseError;
+            var defn: FlagDefinition = getFlagByLongName(self.flags.items, flag_name) orelse {
+                try self.setError("Unrecognized option \"--{s}\"", .{flag_name});
+                return error.ParseError;
+            };
 
             var action_taken: Action = undefined;
 
@@ -575,9 +631,15 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                 .Bool => {
                     action_taken = Action.ContinueToNextToken;
                     if (extractEqualValue(token)) |value| {
-                        try conv_fn(ptr, value);
+                        conv_fn(ptr, value) catch |err| {
+                            // NOTE: zig bug--using "switch (err) {...}" doesn't compile!
+                            if (err == error.ParseError) {
+                                try self.setError("Can't set flag \"--{s}\" to \"{s}\"", .{ flag_name, value });
+                            }
+                            return err;
+                        };
                     } else {
-                        try conv_fn(ptr, "true");
+                        try conv_fn(ptr, "true"); // This should never give a parse error...
                     }
                 },
                 .Str => {
@@ -589,7 +651,10 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                     } else if (extractNextValue(remainder)) |v| {
                         action_taken = Action.SkipNextToken;
                         value = v;
-                    } else return error.ParseError; // missing a string value
+                    } else {
+                        try self.setError("Missing value for option \"{s}\"", .{flag_name});
+                        return error.ParseError; // missing a string value
+                    }
 
                     // We want our own, backing copy of the value...
                     const value_copy = try self.allocator.dupe(u8, value);
@@ -600,7 +665,13 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                     errdefer _ = self.values.pop();
 
                     // Attempt the conversion
-                    try conv_fn(ptr, value_copy);
+                    conv_fn(ptr, value_copy) catch |err| {
+                        // NOTE: zig bug--using "switch (err) {...}" doesn't compile!
+                        if (err == error.ParseError) {
+                            try self.setError("Can't set flag \"--{s}\" to \"{s}\"", .{ flag_name, value });
+                        }
+                        return err;
+                    };
                 },
             }
 
@@ -609,7 +680,10 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
 
         fn fillShortValue(self: *Self, token: []const u8, remainder: [][]const u8) !Action {
             var flag_name = token[0];
-            var defn: FlagDefinition = getFlagByShortName(self.flags.items, flag_name) orelse return error.ParseError; // bad name
+            var defn: FlagDefinition = getFlagByShortName(self.flags.items, flag_name) orelse {
+                try self.setError("Unrecognized option \"-{c}\"", .{flag_name});
+                return error.ParseError;
+            };
 
             var action_taken: Action = undefined;
 
@@ -620,10 +694,16 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                 .Bool => {
                     if (token.len > 1 and token[1] == '=') {
                         action_taken = Action.ContinueToNextToken; // didn't use any of the remainder
-                        try conv_fn(ptr, token[2..]);
+                        conv_fn(ptr, token[2..]) catch |err| {
+                            // NOTE: zig bug--using "switch (err) {...}" doesn't compile!
+                            if (err == error.ParseError) {
+                                try self.setError("Can't set flag \"-{c}\" to \"{s}\"", .{ flag_name, token[2..] });
+                            }
+                            return err;
+                        };
                     } else {
                         action_taken = Action.AdvanceOneCharacter;
-                        try conv_fn(ptr, "true");
+                        try conv_fn(ptr, "true"); // This should never give a parse error
                     }
                 },
                 .Str => {
@@ -635,7 +715,10 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                     } else if (extractNextValue(remainder)) |v| {
                         action_taken = Action.SkipNextToken;
                         value = v;
-                    } else return error.ParseError; // missing string value
+                    } else {
+                        try self.setError("Missing value for option \"{c}\"", .{flag_name});
+                        return error.ParseError; // missing a string value
+                    }
 
                     // We want our own, backing copy of the value...
                     const value_copy = try self.allocator.dupe(u8, value);
@@ -646,7 +729,13 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                     errdefer _ = self.values.pop();
 
                     // Attempt the conversion
-                    try conv_fn(ptr, value_copy);
+                    conv_fn(ptr, value_copy) catch |err| {
+                        // NOTE: zig bug--using "switch (err) {...}" doesn't compile!
+                        if (err == error.ParseError) {
+                            try self.setError("Can't set flag \"-{c}\" to \"{s}\"", .{ flag_name, token[2..] });
+                        }
+                        return err;
+                    };
                 },
             }
 
