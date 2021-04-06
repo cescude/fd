@@ -8,6 +8,7 @@ const Config = struct {
     use_color: bool = true,
     print_files: bool = false,
     print_paths: bool = false,
+    exts: ?[]const u8 = null,
 };
 
 pub fn main() !void {
@@ -34,20 +35,30 @@ pub fn main() !void {
 
     args.summary(
         \\Recursively lists files. It's much faster than either fd or find
-        \\(although, to be fair, it does much less).
+        \\(although, to be fair, it does much, much less).
     );
 
     var show_usage: bool = false;
 
     try args.flag("color", 'c', &cfg.use_color, "Enable use of color (defaults to isatty)");
-    try args.flag("files", 'f', &cfg.print_files, "Only print files");
-    try args.flag("paths", 'p', &cfg.print_paths, "Only print paths");
+    try args.flag("files", 'f', &cfg.print_files, "Print files");
+    try args.flag("paths", 'p', &cfg.print_paths, "Print paths");
+    try args.option("exts", 'e', &cfg.exts, "E1[,E2...]",
+        \\Comma-separated list of extensions. If specified, only
+        \\files with the given extensions will be printed. Implies
+        \\`--files`.
+    );
     try args.flag("help", 'h', &show_usage, "Display this help message");
 
     args.parse() catch args.printUsageAndDie();
 
     if (show_usage) {
         args.printUsageAndDie();
+    }
+
+    // If ``exts` is specified, make sure `print_files` is enabled as well!
+    if (cfg.exts) |_| {
+        cfg.print_files = true;
     }
 
     // If neither is selected, default to both :^(
@@ -206,7 +217,7 @@ fn Proc(comptime WriterType: type) type {
                 }) catch |err| {
                     switch (err) {
                         error.AccessDenied => {
-                            try self.styled(Style.AccessDenied, dropRoot(root, cur_path), "\n");
+                            // try self.styled(Style.AccessDenied, dropRoot(root, cur_path), "\n");
                             continue;
                         },
                         else => return err,
@@ -255,6 +266,27 @@ fn Proc(comptime WriterType: type) type {
 
                 if (self.cfg.print_files) {
                     for (files_found.items) |file| {
+                        if (self.cfg.exts) |exts| {
+                            const file_ext = std.fs.path.extension(file.name);
+                            if (file_ext.len == 0) {
+                                // No extension? Definitely not going to match anything...
+                                continue;
+                            }
+
+                            var ext_match = false;
+
+                            var it = std.mem.tokenize(exts, ",");
+                            while (it.next()) |ext| {
+                                // file_ext is always preceded by a `.` here
+                                ext_match = ext_match or std.mem.eql(u8, ext, file_ext[1..]);
+                            }
+
+                            if (!ext_match) {
+                                // None of the extensions matched, move to the next file
+                                continue;
+                            }
+                        }
+
                         const str = dropRoot(root, file.name);
                         const dname = std.fs.path.dirname(str);
                         const fname = std.fs.path.basename(str);

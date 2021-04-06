@@ -1,11 +1,10 @@
 // TODO: help strings
-// TODO: make sure any strings going in get duplicated?
-// TODO: implement array-like options (eg. -e one -e two -e three becomes .{"one","two","three"})
-// TODO: friendly error strings to go along with the unfriendly error tags
 // TODO: documentation
 // TODO: ascii whitespace? what's the utf8 story here?
 // TODO: split options and flag definitions, for extra help documentation
 const std = @import("std");
+
+const FlagConverter = @import("flag_converters.zig").FlagConverter;
 
 const expect = std.testing.expect;
 const expectEqualStrings = std.testing.expectEqualStrings;
@@ -85,143 +84,18 @@ test "Reflow paragraph text" {
     }
 }
 
-fn contains(comptime T: type, needle: []const T, haystack: [][]const T) bool {
-    for (haystack) |hay| {
-        if (std.mem.eql(T, needle, hay)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-fn truthValue(val: []const u8) !bool {
-    var truly: [5][]const u8 = .{ "true", "yes", "on", "y", "1" };
-    var falsy: [5][]const u8 = .{ "false", "no", "off", "n", "0" };
-
-    if (contains(u8, val, truly[0..])) {
-        return true;
-    }
-
-    if (contains(u8, val, falsy[0..])) {
-        return false;
-    }
-
-    return error.ParseError;
-}
-
-const FlagPtr = struct {
-    ptr: usize,
-    conv_fn: ConvFn,
-
-    // TODO: string that describes the flag type? (NUM, STR, etc?
-    const ConvFn = fn (ptr: usize, value: []const u8) error{ParseError}!void;
-};
-
-fn flagConv(ptr: anytype) FlagPtr {
-    const T: type = @typeInfo(@TypeOf(ptr)).Pointer.child;
-
-    const impl = struct {
-        fn convert(p: usize, value: []const u8) error{ParseError}!void {
-
-            // If T is an optional, we need to get at the underlying type for
-            // the below conversions. Define a type C to inspect this.
-
-            const C: type = switch (@typeInfo(T)) {
-                .Optional => @typeInfo(T).Optional.child,
-                else => T,
-            };
-            comptime var info = @typeInfo(C);
-
-            var real_ptr: *T = @intToPtr(*T, p);
-
-            switch (info) {
-                .Int => switch (info.Int.signedness) {
-                    .signed => {
-                        real_ptr.* = std.fmt.parseInt(C, value, 10) catch return error.ParseError;
-                    },
-                    .unsigned => {
-                        real_ptr.* = std.fmt.parseUnsigned(C, value, 10) catch return error.ParseError;
-                    },
-                },
-                .Bool => {
-                    real_ptr.* = try truthValue(value);
-                },
-                .Pointer => {
-                    const is_const_u8_slice =
-                        info.Pointer.size == .Slice and info.Pointer.child == u8 and info.Pointer.is_const;
-
-                    if (is_const_u8_slice) {
-                        real_ptr.* = value;
-                    } else {
-                        @compileError("Unsupported flag type: " ++ @typeName(T));
-                    }
-                },
-                else => {
-                    @compileError("Unsupported flag type: " ++ @typeName(T));
-                },
-            }
-        }
-    };
-
-    return .{
-        .ptr = @ptrToInt(ptr),
-        .conv_fn = impl.convert,
-    };
-}
-
-test "Typed/Generic flag conversion functionality" {
-    var flag0: u32 = 0;
-    var flag1: i7 = 0;
-    var flag2: bool = false;
-    var flag3: []const u8 = "fail";
-
-    var flag4: ?bool = null;
-    var flag5: ?u64 = null;
-    var flag6: ?i63 = null;
-    var flag7: ?[]const u8 = "fail";
-
-    const converters = [_]FlagPtr{
-        flagConv(&flag0),
-        flagConv(&flag1),
-        flagConv(&flag2),
-        flagConv(&flag3),
-        flagConv(&flag4),
-        flagConv(&flag5),
-        flagConv(&flag6),
-        flagConv(&flag7),
-    };
-
-    try converters[0].conv_fn(converters[0].ptr, "1234");
-    try converters[1].conv_fn(converters[1].ptr, "43");
-    try converters[2].conv_fn(converters[2].ptr, "true");
-    try converters[3].conv_fn(converters[3].ptr, "pass");
-    try converters[4].conv_fn(converters[4].ptr, "true");
-    try converters[5].conv_fn(converters[5].ptr, "123456");
-    try converters[6].conv_fn(converters[6].ptr, "434343");
-    try converters[7].conv_fn(converters[7].ptr, "pass");
-
-    expect(flag0 == 1234);
-    expect(flag1 == 43);
-    expect(flag2);
-    expectEqualStrings("pass", flag3);
-    expect(flag4.?);
-    expect(flag5.? == 123456);
-    expect(flag6.? == 434343);
-    expectEqualStrings("pass", flag7.?);
-}
-
 const FlagDefinition = struct {
     long_name: ?[]const u8,
     short_name: ?u8,
+    val_name: ?[]const u8,
     description: []const u8,
-    // There's different parsing rules if this is a bool vs string (bools can
-    // omit an equals value, and can't be assigned by a token in the next
-    // position,
+    // There's different parsing rules if this is a bool (flag) vs string
+    // (option), namely that bools can omit an equals value, and can't be
+    // assigned by a token in the next position.
     //
-    // Eg: "--bool_flag" and "--bool_flag=true" but not "--bool_flag true")
-    flag_type: enum { Bool, Str },
-    val_ptr: FlagPtr,
+    // Eg: "--bool_flag" and "--bool_flag=true" but not "--bool_flag true"
+    parse_type: enum { Bool, Str },
+    val_ptr: FlagConverter,
 };
 
 fn extractName(token: []const u8) []const u8 {
@@ -379,10 +253,11 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             }
 
             for (self.flags.items) |flag_defn| {
-                switch (flag_defn.flag_type) {
-                    .Bool => try self.printBoolFlagUsage(flag_defn, W, writer),
-                    .Str => try self.printFlagUsage(flag_defn, W, writer),
-                }
+                try self.printFlagUsage(flag_defn, W, writer);
+                // switch (flag_defn.parse_type) {
+                //     .Bool => try self.printBoolFlagUsage(flag_defn, W, writer),
+                //     .Str => try self.printFlagUsage(flag_defn, W, writer),
+                // }
             }
         }
 
@@ -413,19 +288,34 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             }
         }
 
+        fn specStringAlloc(allocator: *std.mem.Allocator, long_name: ?[]const u8, short_name: ?u8, maybe_val_name: ?[]const u8) ![]const u8 {
+            if (long_name == null and short_name == null) {
+                unreachable;
+            }
+
+            if (maybe_val_name) |val_name| {
+                if (short_name != null and long_name != null) {
+                    return try std.fmt.allocPrint(allocator, "-{c}, --{s}={s}", .{ short_name.?, long_name.?, val_name });
+                } else if (short_name != null) {
+                    return try std.fmt.allocPrint(allocator, "-{c}={s}", .{ short_name.?, val_name });
+                } else if (long_name != null) {
+                    return try std.fmt.allocPrint(allocator, "    --{s}={s}", .{ long_name.?, val_name });
+                }
+            } else {
+                if (short_name != null and long_name != null) {
+                    return try std.fmt.allocPrint(allocator, "-{c}, --{s}", .{ short_name.?, long_name.? });
+                } else if (short_name != null) {
+                    return try std.fmt.allocPrint(allocator, "-{c}", .{short_name.?});
+                } else if (long_name != null) {
+                    return try std.fmt.allocPrint(allocator, "    --{s}", .{long_name.?});
+                }
+            }
+
+            unreachable;
+        }
+
         fn printFlagUsage(self: *Self, defn: FlagDefinition, comptime W: type, writer: W) !void {
-
-            // TODO: separate flag/option definitions and let the option version
-            // specify the OPT part
-
-            var spec: []const u8 = if (defn.short_name != null and defn.long_name != null)
-                try std.fmt.allocPrint(self.allocator, "-{c}, --{s}=<opt>", .{ defn.short_name.?, defn.long_name.? })
-            else if (defn.short_name != null)
-                try std.fmt.allocPrint(self.allocator, "-{c}=<opt>", .{defn.short_name})
-            else if (defn.long_name != null)
-                try std.fmt.allocPrint(self.allocator, "    --{s}=<opt>", .{defn.long_name})
-            else
-                unreachable; // Should have either a short or long name, no?
+            var spec: []const u8 = try specStringAlloc(self.allocator, defn.long_name, defn.short_name, defn.val_name);
             defer self.allocator.free(spec);
 
             try writer.print("   {s: <25} ", .{spec});
@@ -470,13 +360,37 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
         ///
         /// Boolean flags have slightly different parsing rules from
         /// string/value flags.
-        pub fn flag(self: *Self, long_name: ?[]const u8, short_name: ?u8, ptr: anytype, description: []const u8) !void {
+        pub fn flag(self: *Self, comptime long_name: ?[]const u8, comptime short_name: ?u8, ptr: anytype, description: []const u8) !void {
+            if (long_name == null and short_name == null) {
+                @compileError("Must provide at least one name to identify this flag");
+            }
+            const is_bool = @TypeOf(ptr) == *bool or @TypeOf(ptr) == *?bool;
             try self.flags.append(.{
                 .long_name = long_name,
                 .short_name = short_name,
+                .val_name = null,
                 .description = description,
-                .flag_type = if (@TypeOf(ptr) == *bool or @TypeOf(ptr) == *?bool) .Bool else .Str,
-                .val_ptr = flagConv(ptr),
+                .parse_type = if (is_bool) .Bool else .Str,
+                .val_ptr = FlagConverter.init(ptr),
+            });
+        }
+
+        /// This is identical to `flag(...)`, with the exception that it lets
+        /// you provide a name for the argument used in the help text. For
+        /// example, passing "<col>" in for `val_name` yields something akin to:
+        ///     -C, --color=<col>
+        pub fn option(self: *Self, comptime long_name: ?[]const u8, comptime short_name: ?u8, ptr: anytype, val_name: []const u8, description: []const u8) !void {
+            if (long_name == null and short_name == null) {
+                @compileError("Must provide at least one name to identify this flag");
+            }
+            const is_bool = @TypeOf(ptr) == *bool or @TypeOf(ptr) == *?bool;
+            try self.flags.append(.{
+                .long_name = long_name,
+                .short_name = short_name,
+                .val_name = val_name,
+                .description = description,
+                .parse_type = if (is_bool) .Bool else .Str,
+                .val_ptr = FlagConverter.init(ptr),
             });
         }
 
@@ -627,7 +541,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             const ptr = defn.val_ptr.ptr;
             const conv_fn = defn.val_ptr.conv_fn;
 
-            switch (defn.flag_type) {
+            switch (defn.parse_type) {
                 .Bool => {
                     action_taken = Action.ContinueToNextToken;
                     if (extractEqualValue(token)) |value| {
@@ -690,7 +604,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             const ptr = defn.val_ptr.ptr;
             const conv_fn = defn.val_ptr.conv_fn;
 
-            switch (defn.flag_type) {
+            switch (defn.parse_type) {
                 .Bool => {
                     if (token.len > 1 and token[1] == '=') {
                         action_taken = Action.ContinueToNextToken; // didn't use any of the remainder
