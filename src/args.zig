@@ -1,9 +1,7 @@
-// TODO: help strings
-// TODO: documentation
-// TODO: ascii whitespace? what's the utf8 story here?
-// TODO: split options and flag definitions, for extra help documentation
+// TODO: Add a readme or something
 const std = @import("std");
 
+const reflowText = @import("reflow_text.zig").reflowText;
 const FlagConverter = @import("flag_converters.zig").FlagConverter;
 
 const expect = std.testing.expect;
@@ -11,78 +9,6 @@ const expectEqualStrings = std.testing.expectEqualStrings;
 const expectError = std.testing.expectError;
 
 const max_width: usize = 80;
-
-/// Iterator that wraps text around the indicated column length;
-const ReflowTextIterator = struct {
-    allocator: *std.mem.Allocator,
-    current_line: std.ArrayList(u8),
-    token_iterator: std.mem.TokenIterator,
-    width: usize,
-    token: ?[]const u8,
-
-    const Self = @This();
-
-    pub fn init(a: *std.mem.Allocator, text: []const u8, width: usize) Self {
-        return .{
-            .allocator = a,
-            .current_line = std.ArrayList(u8).init(a),
-            .token_iterator = std.mem.tokenize(text, " \t\r\n"),
-            .width = width,
-            .token = null,
-        };
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.current_line.deinit();
-    }
-
-    pub fn next(self: *Self) !?[]const u8 {
-        self.current_line.deinit();
-        self.current_line = std.ArrayList(u8).init(self.allocator);
-
-        var line = &self.current_line;
-
-        while (true) {
-            if (self.token == null) {
-                self.token = self.token_iterator.next();
-            }
-
-            if (self.token) |word| {
-                if (line.items.len == 0 and word.len > self.width) {
-                    try line.appendSlice(word); // Just return the single word
-                    self.token = null;
-                    return line.items;
-                } else if (line.items.len + word.len + 1 > self.width) {
-                    return line.items;
-                } else {
-                    if (line.items.len > 0) {
-                        try line.append(' ');
-                    }
-                    try line.appendSlice(word);
-                    self.token = null;
-                }
-            } else break;
-        }
-
-        return if (line.items.len > 0) line.items else null;
-    }
-};
-
-test "Reflow paragraph text" {
-    var text =
-        \\One two three four five six seven eight nine ten eleven twelve thirteen
-        \\fourteen fifteen sixteen seventeen eighteen nineteen AND tweeeeenty!
-    ;
-
-    var iter = ReflowTextIterator.init(std.testing.allocator, text, 40);
-    defer iter.deinit();
-
-    std.debug.print("\n", .{});
-    while (try iter.next()) |line| {
-        std.debug.print(">>{d: >5} {s}\n", .{ line.len, line });
-        expect(line.len <= 40);
-    }
-}
 
 const FlagDefinition = struct {
     long_name: ?[]const u8,
@@ -238,7 +164,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             try writer.print("\n", .{});
 
             if (self.program_summary) |program_summary| {
-                var iter = ReflowTextIterator.init(self.allocator, program_summary, max_width);
+                var iter = reflowText(self.allocator, program_summary, max_width);
                 defer iter.deinit();
 
                 while (iter.next() catch null) |line| {
@@ -254,37 +180,6 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
 
             for (self.flags.items) |flag_defn| {
                 try self.printFlagUsage(flag_defn, W, writer);
-                // switch (flag_defn.parse_type) {
-                //     .Bool => try self.printBoolFlagUsage(flag_defn, W, writer),
-                //     .Str => try self.printFlagUsage(flag_defn, W, writer),
-                // }
-            }
-        }
-
-        fn printBoolFlagUsage(self: *Self, defn: FlagDefinition, comptime W: type, writer: W) !void {
-            var spec: []const u8 = if (defn.short_name != null and defn.long_name != null)
-                try std.fmt.allocPrint(self.allocator, "-{c}, --{s}", .{ defn.short_name.?, defn.long_name.? })
-            else if (defn.short_name) |short|
-                try std.fmt.allocPrint(self.allocator, "-{c}", .{short})
-            else if (defn.long_name) |long|
-                try std.fmt.allocPrint(self.allocator, "    --{s}", .{long})
-            else
-                unreachable; // Should have either a short or long name, no?
-            defer self.allocator.free(spec);
-
-            try writer.print("   {s: <25} ", .{spec});
-
-            var iter = ReflowTextIterator.init(self.allocator, defn.description, max_width - 29);
-            defer iter.deinit();
-
-            var first_line = true;
-            while (iter.next() catch null) |line| {
-                if (first_line) {
-                    first_line = false;
-                } else {
-                    try writer.print(" " ** 29, .{});
-                }
-                try writer.print("{s}\n", .{line});
             }
         }
 
@@ -320,7 +215,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
 
             try writer.print("   {s: <25} ", .{spec});
 
-            var iter = ReflowTextIterator.init(self.allocator, defn.description, max_width - 29);
+            var iter = reflowText(self.allocator, defn.description, max_width - 29);
             defer iter.deinit();
 
             var first_line = true;
@@ -470,6 +365,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                         }
                     } else if (std.mem.eql(u8, token, "-")) {
                         try self.addPositional(token); // TODO: needs test case
+                        no_more_flags = true;
                     } else if (std.mem.startsWith(u8, token, "-")) {
 
                         // Pull out all short flags from the token
@@ -505,9 +401,11 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                                 // Nope, no subcommand, so just treat like a normal
                                 // positional.
                                 try self.addPositional(token); // TODO: needs test case
+                                no_more_flags = true;
                             }
                         } else {
                             try self.addPositional(token); // TODO: needs test case
+                            no_more_flags = true;
                         }
                     }
                 }
@@ -626,6 +524,9 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                     if (token.len > 1 and token[1] == '=') {
                         action_taken = Action.ContinueToNextToken;
                         value = token[2..];
+                    } else if (token.len > 1) {
+                        try self.setError("Missing value for option \"{c}\"", .{flag_name}); // TODO: test case
+                        return error.ParseError;
                     } else if (extractNextValue(remainder)) |v| {
                         action_taken = Action.SkipNextToken;
                         value = v;
@@ -789,6 +690,9 @@ test "Expecting errors on bad input" {
     expectError(error.ParseError, args.parseSlice(argv[0..]));
 
     argv = [_][]const u8{"positional_argument"};
+    expectError(error.ParseError, args.parseSlice(argv[0..]));
+
+    argv = [_][]const u8{"-ba=anything"};
     expectError(error.ParseError, args.parseSlice(argv[0..]));
 }
 
@@ -1016,7 +920,7 @@ test "Positional functionality" {
     try args.flag("flag1", null, &flag1, "");
     try args.args("FILE", &files);
 
-    var argv = [_][]const u8{ "one.txt", "--flag0", "--flag1", "1234", "two.txt" };
+    var argv = [_][]const u8{ "--flag0", "--flag1", "1234", "one.txt", "two.txt" };
     try args.parseSlice(argv[0..]);
 
     expect(flag0);
