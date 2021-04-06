@@ -38,8 +38,6 @@ pub fn main() !void {
         \\(although, to be fair, it does much, much less).
     );
 
-    var show_usage: bool = false;
-
     try args.flag("color", 'c', &cfg.use_color, "Enable use of color (defaults to isatty)");
     try args.flag("files", 'f', &cfg.print_files, "Print files");
     try args.flag("paths", 'p', &cfg.print_paths, "Print paths");
@@ -48,6 +46,11 @@ pub fn main() !void {
         \\files with the given extensions will be printed. Implies
         \\`--files`.
     );
+
+    var just: ?std.fs.Dir.Entry.Kind = null;
+    try args.flag("just", null, &just, "Only display files of the given type.");
+
+    var show_usage: bool = false;
     try args.flag("help", 'h', &show_usage, "Display this help message");
 
     args.parse() catch args.printUsageAndDie();

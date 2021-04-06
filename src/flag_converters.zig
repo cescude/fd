@@ -31,6 +31,7 @@ fn truthValue(val: []const u8) !bool {
 pub const FlagConverter = struct {
     ptr: usize,
     conv_fn: ConvFn,
+    tag: ?[]const u8,
 
     const Self = @This();
 
@@ -61,6 +62,55 @@ pub const FlagConverter = struct {
         };
     }
 
+    fn _convertEnum(comptime T: type, comptime C: type, p: *T, value: []const u8) !void {
+        var v = p;
+        const info = @typeInfo(C);
+        switch (info) {
+            .Enum => {
+                inline for (info.Enum.fields) |field| {
+                    if (std.ascii.eqlIgnoreCase(field.name, value)) {
+                        v.* = @intToEnum(C, field.value);
+                        return;
+                    }
+                }
+
+                return error.ParseError;
+            },
+            else => unreachable,
+        }
+    }
+
+    // fn enumOptions(comptime e: std.builtin.TypeInfo.Enum) []const u8 {
+    //     return @typeName()
+    //     comptime var sz: usize = 2 + e.fields.len - 1;
+
+    //     inline for (e.fields) |f, idx| {
+    //         if (idx > 0) {
+    //             sz += 1;
+    //         }
+    //         sz += f.name.len;
+    //     }
+
+    //     comptime var buffer: [sz]u8 = undefined;
+
+    //     buffer[0] = '[';
+    //     buffer[sz - 1] = ']';
+
+    //     comptime var offset = 1;
+    //     inline for (e.fields) |f, idx| {
+    //         if (idx > 0) {
+    //             buffer[offset] = '|';
+    //             offset += 1;
+    //         }
+    //         std.mem.copy(u8, buffer[offset..], f.name);
+    //         offset += f.name.len;
+    //     }
+
+    //     std.mem.copy(u8, enum_buffer[enum_offset..], buffer[0..]);
+    //     enum_offset += sz;
+    //     return enum_buffer[enum_offset - sz .. enum_offset];
+    // }
+
     pub fn init(ptr: anytype) Self {
         const T = @typeInfo(@TypeOf(ptr)).Pointer.child; // ptr must be a pointer!
         const C: type = switch (@typeInfo(T)) {
@@ -73,16 +123,17 @@ pub const FlagConverter = struct {
         const impl = struct {
             pub fn convert(p: usize, value: []const u8) error{ParseError}!void {
                 switch (info) {
-                    .Int => try _convertNum(T, C, @intToPtr(*T, p), value),
                     .Bool => try _convertBool(T, @intToPtr(*T, p), value),
                     .Pointer => try _convertStr(T, @intToPtr(*T, p), value),
+                    .Int => try _convertNum(T, C, @intToPtr(*T, p), value),
+                    .Enum => try _convertEnum(T, C, @intToPtr(*T, p), value),
                     else => @compileError("Unsupported type " ++ @typeName(T)),
                 }
             }
         };
 
         const can_convert: bool = switch (info) {
-            .Bool, .Int => true,
+            .Bool, .Int, .Enum => true,
             // Only if it's a pointer to a []const u8
             .Pointer => info.Pointer.size == .Slice and info.Pointer.is_const and info.Pointer.child == u8,
             else => false,
@@ -92,7 +143,18 @@ pub const FlagConverter = struct {
             @compileError("Unsupported type " ++ @typeName(T));
         }
 
-        return FlagConverter{ .ptr = @ptrToInt(ptr), .conv_fn = impl.convert };
+        return FlagConverter{
+            .ptr = @ptrToInt(ptr),
+            .conv_fn = impl.convert,
+            .tag = switch (info) {
+                .Bool => null,
+                .Int => "[num]",
+                .Pointer => "[str]",
+                .Enum => "[enum]", // want something like [enum1|enum2|enum3]...
+                // .Enum => comptime enumOptions(info.Enum),
+                else => unreachable,
+            },
+        };
     }
 };
 
@@ -144,4 +206,14 @@ test "Typed/Generic flag conversion functionality" {
     var str1c = FlagConverter.init(&str1);
     try str1c.conv_fn(str1c.ptr, "pass");
     expectEqualStrings("pass", str1.?);
+
+    var en0: enum { Auto, Off, On } = .Auto;
+    var en0c = FlagConverter.init(&en0);
+    try en0c.conv_fn(en0c.ptr, "Off");
+    expect(en0 == .Off);
+
+    var en1: ?enum { Red, Green, Blue } = null;
+    var en1c = FlagConverter.init(&en1);
+    try en1c.conv_fn(en1c.ptr, "blue");
+    expect(en1.? == .Blue);
 }

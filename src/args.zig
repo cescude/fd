@@ -260,13 +260,16 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                 @compileError("Must provide at least one name to identify this flag");
             }
             const is_bool = @TypeOf(ptr) == *bool or @TypeOf(ptr) == *?bool;
+
+            const conv = FlagConverter.init(ptr);
+
             try self.flags.append(.{
                 .long_name = long_name,
                 .short_name = short_name,
-                .val_name = null,
+                .val_name = conv.tag,
                 .description = description,
                 .parse_type = if (is_bool) .Bool else .Str,
-                .val_ptr = FlagConverter.init(ptr),
+                .val_ptr = conv,
             });
         }
 
@@ -567,19 +570,27 @@ test "anyflag" {
     var flag1: bool = false;
     var flag2: ?[]const u8 = null;
     var flag3: []const u8 = "fail";
+    var flag4: enum { One, Two, Three, Four } = .Three;
+    var flag5: ?enum { Red, Orange, Yellow } = null;
 
     try args.flag("flag0", null, &flag0, "Boolean Opt");
     try args.flag("flag1", null, &flag1, "Boolean");
     try args.flag("flag2", null, &flag2, "String Opt");
     try args.flag("flag3", null, &flag3, "String");
+    try args.flag("flag4", null, &flag4, "Enum");
+    try args.flag("flag5", null, &flag5, "Enum Opt");
 
-    var argv = [_][]const u8{ "--flag0=yes", "--flag1=1", "--flag2=pass", "--flag3=pass" };
+    var argv = [_][]const u8{
+        "--flag0=yes", "--flag1=1", "--flag2=pass", "--flag3=pass", "--flag4=two", "--flag5=YelloW",
+    };
     try args.parseSlice(argv[0..]);
 
     expect(flag0 orelse false);
     expect(flag1);
     expectEqualStrings("pass", flag2 orelse "fail");
     expectEqualStrings("pass", flag3);
+    expect(flag4 == .Two);
+    expect(flag5.? == .Yellow);
 }
 
 test "Omitted flags get default values" {
