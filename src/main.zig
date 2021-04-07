@@ -5,7 +5,7 @@ var stdout = std.io.getStdOut();
 const sep = std.fs.path.sep_str;
 
 const Config = struct {
-    use_color: bool = true,
+    use_color: enum { On, Off, Auto } = .Auto,
     print_files: bool = false,
     print_paths: bool = false,
     exts: ?[]const u8 = null,
@@ -15,7 +15,7 @@ pub fn main() !void {
     var buffer: [4096]u8 = undefined;
     var cwd = try std.os.getcwd(buffer[0..]);
 
-    var cfg = Config{ .use_color = std.os.isatty(stdout.handle) };
+    var cfg = Config{};
 
     var outs = std.io.bufferedWriter(stdout.writer());
     defer outs.flush() catch {};
@@ -38,7 +38,7 @@ pub fn main() !void {
         \\(although, to be fair, it does much, much less).
     );
 
-    try args.flag("color", 'c', &cfg.use_color, "Enable use of color (defaults to isatty)");
+    try args.flag("color", 'c', &cfg.use_color, "Enable use of color (default is Auto)");
     try args.flag("files", 'f', &cfg.print_files, "Print files");
     try args.flag("paths", 'p', &cfg.print_paths, "Print paths");
     try args.option("exts", 'e', &cfg.exts, "E1[,E2...]",
@@ -46,9 +46,6 @@ pub fn main() !void {
         \\files with the given extensions will be printed. Implies
         \\`--files`.
     );
-
-    var just: ?std.fs.Dir.Entry.Kind = null;
-    try args.flag("just", null, &just, "Only display files of the given type.");
 
     var show_usage: bool = false;
     try args.flag("help", 'h', &show_usage, "Display this help message");
@@ -59,7 +56,12 @@ pub fn main() !void {
         args.printUsageAndDie();
     }
 
-    // If ``exts` is specified, make sure `print_files` is enabled as well!
+    // If `use_color` is .Auto, use isatty to handle the change
+    if (cfg.use_color == .Auto) {
+        cfg.use_color = if (std.os.isatty(stdout.handle)) .On else .Off;
+    }
+
+    // If `exts` is specified, make sure `print_files` is enabled as well!
     if (cfg.exts) |_| {
         cfg.print_files = true;
     }
@@ -177,7 +179,7 @@ fn Proc(comptime WriterType: type) type {
         };
 
         pub fn styled(self: *Self, comptime style: Style, str: []const u8, comptime suffix: []const u8) !void {
-            if (self.cfg.use_color) {
+            if (self.cfg.use_color == .On) {
                 switch (style) {
                     .Prefix => try self.writer.print("\u{001b}[1m{s}{s}\u{001b}[0m", .{ str, suffix }),
                     .Default, .Unknown => try self.writer.print("{s}{s}", .{ str, suffix }),

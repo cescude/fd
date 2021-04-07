@@ -215,6 +215,12 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
 
             try writer.print("   {s: <25} ", .{spec});
 
+            if (spec.len > 25) {
+                // If the spec string pushes into the summary text, start the
+                // summary text on the next line.
+                try writer.print("\n" ++ " " ** 29, .{});
+            }
+
             var iter = reflowText(self.allocator, defn.description, max_width - 29);
             defer iter.deinit();
 
