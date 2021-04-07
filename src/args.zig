@@ -84,11 +84,14 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
 
         values: std.ArrayList([]const u8), // Backing array for string arguments
 
+        // TODO: Clean up this positional stuff into its own struct named `extras`
         positionals: std.ArrayList([]const u8), // Backing array for positional arguments
         positional_name: ?[]const u8 = null, // Name for positionals, used in help messages
         positional_ptr: ?*[][]const u8 = null, // Ptr to retrieve the positional array
+        positional_desc: ?[]const u8 = null, // Description for usage
 
         flags: std.ArrayList(FlagDefinition), // List of argument patterns
+        args: std.ArrayList(PositionalArg),
         subcommands: std.ArrayList(SubCommand), // Allow to switch into namespaced command args
         command_used: ?CommandEnumT,
 
@@ -97,6 +100,12 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
         const Self = @This();
 
         const Error = error{ ParseError, OutOfMemory };
+
+        const PositionalArg = struct {
+            name: []const u8,
+            description: []const u8,
+            arg_conv: FlagConverter,
+        };
 
         const SubCommand = struct {
             name: []const u8,
@@ -110,6 +119,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                 .values = std.ArrayList([]const u8).init(allocator),
                 .positionals = std.ArrayList([]const u8).init(allocator),
                 .flags = std.ArrayList(FlagDefinition).init(allocator),
+                .args = std.ArrayList(PositionalArg).init(allocator),
                 .subcommands = std.ArrayList(SubCommand).init(allocator),
                 .command_used = null,
             };
@@ -127,6 +137,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             self.positionals.deinit();
 
             self.flags.deinit();
+            self.args.deinit();
 
             for (self.subcommands.items) |*sub| {
                 sub.args.deinit();
@@ -153,9 +164,13 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                 try writer.print("[OPTIONS]... ", .{});
             }
 
+            for (self.args.items) |a| {
+                try writer.print("{s} ", .{a.name});
+            }
+
             if (self.positional_ptr) |_| {
                 if (self.positional_name) |positional_name| {
-                    try writer.print("[{s}]...", .{self.positional_name.?});
+                    try writer.print("{s}...", .{self.positional_name.?});
                 } else {
                     try writer.print("...", .{});
                 }
@@ -170,16 +185,30 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                 while (iter.next() catch null) |line| {
                     try writer.print("{s}\n", .{line});
                 }
-            } else {
-                try writer.print("\n", .{});
             }
+
             try writer.print("\n", .{});
+
             if (self.flags.items.len > 0) {
                 try writer.print("OPTIONS\n", .{});
             }
 
             for (self.flags.items) |flag_defn| {
                 try self.printFlagUsage(flag_defn, W, writer);
+            }
+
+            try writer.print("\n", .{});
+
+            if (self.args.items.len > 0) {
+                try writer.print("ARGS\n", .{});
+            }
+
+            for (self.args.items) |arg_defn| {
+                try self.printArgUsage(arg_defn.name, arg_defn.description, W, writer);
+            }
+
+            if (self.positional_name) |posn_name| {
+                try self.printArgUsage(posn_name, self.positional_desc.?, W, writer);
             }
         }
 
@@ -222,6 +251,29 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             }
 
             var iter = reflowText(self.allocator, defn.description, max_width - 29);
+            defer iter.deinit();
+
+            var first_line = true;
+            while (iter.next() catch null) |line| {
+                if (first_line) {
+                    first_line = false;
+                } else {
+                    try writer.print(" " ** 29, .{});
+                }
+                try writer.print("{s}\n", .{line});
+            }
+        }
+
+        // TODO: This is _very_ similar to printFlagUsage(...)!
+        fn printArgUsage(self: *Self, arg_name: []const u8, arg_desc: []const u8, comptime W: type, writer: W) !void {
+            try writer.print("   {s: <25} ", .{arg_name});
+
+            // This is very unlikely, but...
+            if (arg_name.len > 25) {
+                try writer.print("\n" ++ " " ** 29, .{});
+            }
+
+            var iter = reflowText(self.allocator, arg_desc, max_width - 29);
             defer iter.deinit();
 
             var first_line = true;
@@ -298,10 +350,19 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             });
         }
 
+        pub fn arg(self: *Self, positional_name: []const u8, ptr: anytype, description: []const u8) !void {
+            try self.args.append(.{
+                .name = positional_name, // TODO: Should we piggyback on conv.tag at all?
+                .description = description,
+                .arg_conv = FlagConverter.init(ptr),
+            });
+        }
+
         /// Name and bind the non-flag commandline arguments
-        pub fn args(self: *Self, positional_name: []const u8, ptr: *[][]const u8) !void {
+        pub fn extras(self: *Self, positional_name: []const u8, ptr: *[][]const u8, description: []const u8) !void {
             self.positional_name = positional_name;
             self.positional_ptr = ptr;
+            self.positional_desc = description;
         }
 
         // For right now, we don't support subcommands of subcommands.
@@ -421,16 +482,31 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             }
 
             if (self.positional_ptr) |posns| {
-                posns.* = self.positionals.items;
+                const num_posns = self.positionals.items.len;
+                const num_args = self.args.items.len;
+
+                if (num_args <= num_posns) {
+                    posns.* = self.positionals.items[num_args..];
+                } else {
+                    posns.* = self.positionals.items[0..0];
+                }
             }
         }
 
         fn addPositional(self: *Self, value: []const u8) !void {
-            if (self.positional_ptr) |_| {
+            if (self.args.items.len > self.positionals.items.len) {
+                var defn = self.args.items[self.positionals.items.len];
+
+                const dup_value = try self.allocator.dupe(u8, value);
+                errdefer self.allocator.free(dup_value);
+
+                try defn.arg_conv.conv_fn(defn.arg_conv.ptr, dup_value);
+                try self.positionals.append(dup_value);
+            } else if (self.positional_ptr) |_| {
                 try self.positionals.append(try self.allocator.dupe(u8, value));
             } else {
-                // This hasn't been configured to accept positionals with the
-                // `args(...)` function.
+                // This hasn't been configured to accept positionals with either
+                // `arg(...)` or `extras(...)`
                 try self.setError("Unrecognized argument \"{s}\"", .{value});
                 return error.ParseError;
             }
