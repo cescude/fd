@@ -80,36 +80,43 @@ pub const FlagConverter = struct {
         }
     }
 
-    // fn enumOptions(comptime e: std.builtin.TypeInfo.Enum) []const u8 {
-    //     return @typeName()
-    //     comptime var sz: usize = 2 + e.fields.len - 1;
+    fn joinedEnumSpace(comptime C: type) usize {
+        comptime {
+            const names = std.meta.fieldNames(C);
+            var sz: comptime_int = 0;
+            for (names) |name| {
+                sz += name.len;
+            }
+            // [one|two|three]
+            // [] (2) + 3 + || (3-1)
+            return sz + 2 + names.len - 1;
+        }
+    }
 
-    //     inline for (e.fields) |f, idx| {
-    //         if (idx > 0) {
-    //             sz += 1;
-    //         }
-    //         sz += f.name.len;
-    //     }
+    fn joinedEnumVals(comptime C: type) *const [joinedEnumSpace(C)]u8 {
+        comptime {
+            const names = std.meta.fieldNames(C);
+            var joined: [joinedEnumSpace(C)]u8 = undefined;
+            var offset = 0;
 
-    //     comptime var buffer: [sz]u8 = undefined;
+            joined[offset] = '[';
+            offset += 1;
 
-    //     buffer[0] = '[';
-    //     buffer[sz - 1] = ']';
+            for (names) |name, idx| {
+                if (idx > 0) {
+                    joined[offset] = '|';
+                    offset += 1;
+                }
 
-    //     comptime var offset = 1;
-    //     inline for (e.fields) |f, idx| {
-    //         if (idx > 0) {
-    //             buffer[offset] = '|';
-    //             offset += 1;
-    //         }
-    //         std.mem.copy(u8, buffer[offset..], f.name);
-    //         offset += f.name.len;
-    //     }
+                std.mem.copy(u8, joined[offset..], name);
+                offset += name.len;
+            }
 
-    //     std.mem.copy(u8, enum_buffer[enum_offset..], buffer[0..]);
-    //     enum_offset += sz;
-    //     return enum_buffer[enum_offset - sz .. enum_offset];
-    // }
+            joined[offset] = ']';
+
+            return &joined;
+        }
+    }
 
     pub fn init(ptr: anytype) Self {
         const T = @typeInfo(@TypeOf(ptr)).Pointer.child; // ptr must be a pointer!
@@ -143,17 +150,18 @@ pub const FlagConverter = struct {
             @compileError("Unsupported type " ++ @typeName(T));
         }
 
+        const short_tag = switch (info) {
+            .Bool => null,
+            .Int => "[num]",
+            .Pointer => "[str]",
+            .Enum => joinedEnumVals(C),
+            else => unreachable,
+        };
+
         return FlagConverter{
             .ptr = @ptrToInt(ptr),
             .conv_fn = impl.convert,
-            .tag = switch (info) {
-                .Bool => null,
-                .Int => "[num]",
-                .Pointer => "[str]",
-                .Enum => "[enum]", // want something like [enum1|enum2|enum3]...
-                // .Enum => comptime enumOptions(info.Enum),
-                else => unreachable,
-            },
+            .tag = short_tag,
         };
     }
 };
@@ -209,11 +217,13 @@ test "Typed/Generic flag conversion functionality" {
 
     var en0: enum { Auto, Off, On } = .Auto;
     var en0c = FlagConverter.init(&en0);
+    expectEqualStrings("[Auto|Off|On]", en0c.tag.?);
     try en0c.conv_fn(en0c.ptr, "Off");
     expect(en0 == .Off);
 
     var en1: ?enum { Red, Green, Blue } = null;
     var en1c = FlagConverter.init(&en1);
+    expectEqualStrings("[Red|Green|Blue]", en1c.tag.?);
     try en1c.conv_fn(en1c.ptr, "blue");
     expect(en1.? == .Blue);
 }
