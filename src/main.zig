@@ -1,6 +1,7 @@
 const std = @import("std");
 const Args = @import("args.zig").Args;
 var stdout = std.io.getStdOut();
+const ArrayList = std.ArrayList;
 
 const sep = std.fs.path.sep_str;
 
@@ -90,7 +91,7 @@ pub fn main() !void {
     }
 
     var proc = Proc(@TypeOf(writer)).init(allocator, cfg, &writer);
-    try proc.run(cwd);
+    nosuspend try proc.run(cwd);
 }
 
 const Entry = std.fs.Dir.Entry;
@@ -171,6 +172,56 @@ fn entryGt(v: void, e0: Entry, e1: Entry) bool {
 //     _ = std.sort.sort(usize, items[0..], {}, impl.lte); // panic!
 // }
 
+const ScanResults = struct {
+    path: []const u8,
+    paths: ArrayList([]const u8),
+    files: ArrayList(Entry),
+};
+
+// Make sure the memory allocated for ScanResults is taken care of!
+// => paths needs to be deinit'd, and its contents free'd
+// => files needs to be deinit'd, and its contents free'd
+fn scanPath(allocator: *std.mem.Allocator, path: []const u8) callconv(.Async) !ScanResults {
+    var paths = ArrayList([]const u8).init(allocator);
+    var files = ArrayList(Entry).init(allocator);
+
+    var dir = std.fs.openDirAbsolute(path, .{
+        .iterate = true,
+        .no_follow = true,
+    }) catch |err| switch (err) {
+        error.AccessDenied => return ScanResults{
+            .path = path,
+            .paths = paths,
+            .files = files,
+        },
+        else => return err,
+    };
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (try iter.next()) |p| {
+        var qqq = [_][]const u8{ path, p.name };
+        var joined = try std.fs.path.join(allocator, qqq[0..]);
+
+        switch (p.kind) {
+            .Directory => try paths.append(joined),
+            else => try files.append(Entry{ .kind = p.kind, .name = joined }),
+        }
+    }
+
+    // Sort paths z-a (since we pluck them off back-to-front, above)
+    _ = std.sort.sort([]const u8, paths.items, {}, strGt);
+
+    // Sort files a-z (since we iterate over them normally)
+    _ = std.sort.sort(Entry, files.items, {}, entryLt);
+
+    return ScanResults{
+        .path = path,
+        .paths = paths,
+        .files = files,
+    };
+}
+
 fn Proc(comptime WriterType: type) type {
     return struct {
         allocator: *std.mem.Allocator,
@@ -221,73 +272,54 @@ fn Proc(comptime WriterType: type) type {
             }
         }
 
-        pub fn run(self: *Self, root: []const u8) !void {
-            var paths = std.ArrayList([]const u8).init(self.allocator);
-            defer {
-                for (paths.items) |p| self.allocator.free(p);
-                paths.deinit();
-            }
+        pub fn run(self: *Self, root: []const u8) callconv(.Async) !void {
 
-            try paths.append(try self.allocator.dupe(u8, root));
-            while (paths.items.len > 0) {
-                var cur_path = paths.pop();
-                defer self.allocator.free(cur_path);
+            // var scan_results = ArrayList(@Frame(scanPath)).init(self.allocator);
+            var scan_results = ArrayList(ScanResults).init(self.allocator);
+            defer scan_results.deinit();
 
-                var dir = std.fs.openDirAbsolute(cur_path, .{
-                    .iterate = true,
-                    .no_follow = true,
-                }) catch |err| {
-                    switch (err) {
-                        error.AccessDenied => {
-                            // try self.styled(Style.AccessDenied, dropRoot(root, cur_path), "\n");
-                            continue;
-                        },
-                        else => return err,
-                    }
-                };
-                defer dir.close();
+            // try scan_results.append(async scanPath(self.allocator, try self.allocator.dupe(u8, root)));
+            try scan_results.append(try scanPath(self.allocator, try self.allocator.dupe(u8, root)));
 
-                if (paths.items.len > 0 and self.cfg.print_paths) {
-                    try self.styled(Style.Prefix, dropRoot(root, cur_path), "\n");
-                }
-
-                var files_found = std.ArrayList(Entry).init(self.allocator);
+            while (scan_results.items.len > 0) {
+                var frame = scan_results.pop();
+                // var sr = try await frame;
+                var sr = frame;
                 defer {
-                    for (files_found.items) |file| {
-                        switch (file.kind) {
-                            .Directory => unreachable, //paths.append(entry.name) catch {},
-                            else => self.allocator.free(file.name),
-                        }
+                    self.allocator.free(sr.path);
+
+                    // The path strings themselves need to stick around to be
+                    // used in future ScanResults (eventually free'd by the
+                    // prior call).
+                    sr.paths.deinit();
+
+                    // Not so with the file variables...
+                    for (sr.files.items) |f| {
+                        self.allocator.free(f.name);
                     }
-                    files_found.deinit();
+                    sr.files.deinit();
                 }
 
-                // Store the size of the paths list; we're going to (reverse)
-                // sort any added paths found in the current directory & want to
-                // only affect those that were newly added...
-                const paths_size = paths.items.len;
-
-                var iterator = dir.iterate();
-                while (try iterator.next()) |p| {
-                    if (p.name[0] == '.' and !self.cfg.include_hidden) continue;
-
-                    var qqq = [_][]const u8{ cur_path, p.name };
-                    var joined = try std.fs.path.join(self.allocator, qqq[0..]);
-
-                    switch (p.kind) {
-                        .Directory => try paths.append(joined),
-                        else => try files_found.append(Entry{ .kind = p.kind, .name = joined }),
-                    }
+                if (self.cfg.print_paths and scan_results.items.len > 0) {
+                    try self.styled(Style.Prefix, dropRoot(root, sr.path), "");
+                    try self.styled(Style.Default, "", "\n");
                 }
 
-                // Sort paths z-a (since we pluck them off back-to-front, above)
-                _ = std.sort.sort([]const u8, paths.items[paths_size..], {}, strGt);
+                for (sr.paths.items) |path| {
+                    const fname = std.fs.path.basename(path);
+                    if (fname[0] == '.' and !self.cfg.include_hidden) {
+                        self.allocator.free(path);
+                        continue;
+                    }
 
-                // Sort files a-z (since we iterate over them normally, below)
-                _ = std.sort.sort(Entry, files_found.items, {}, entryLt);
+                    // try scan_results.append(async scanPath(self.allocator, path));
+                    try scan_results.append(try scanPath(self.allocator, path));
+                }
 
                 if (self.cfg.print_files) {
-                    for (files_found.items) |file| {
+                    for (sr.files.items) |file| {
+                        if (file.name[0] == '.' and !self.cfg.include_hidden) continue;
+
                         if (self.cfg.exts) |exts| {
                             const file_ext = std.fs.path.extension(file.name);
                             if (file_ext.len == 0) {
@@ -319,15 +351,9 @@ fn Proc(comptime WriterType: type) type {
 
                         switch (file.kind) {
                             .Directory => unreachable,
-                            .File => {
-                                try self.styled(Style.Default, fname, "\n");
-                            },
-                            .SymLink => {
-                                try self.styled(Style.SymLink, fname, "\n");
-                            },
-                            else => {
-                                try self.styled(Style.Unknown, fname, "\n");
-                            },
+                            .File => try self.styled(Style.Default, fname, "\n"),
+                            .SymLink => try self.styled(Style.SymLink, fname, "\n"),
+                            else => try self.styled(Style.Unknown, fname, "\n"),
                         }
                     }
                 }
