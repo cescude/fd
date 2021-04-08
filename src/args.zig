@@ -1,76 +1,11 @@
 // TODO: Add a readme or something
+// TODO: place ptr up front in flag/arg/extra commands
 const std = @import("std");
 
 const reflowText = @import("reflow_text.zig").reflowText;
 const FlagConverter = @import("flag_converters.zig").FlagConverter;
 
-const expect = std.testing.expect;
-const expectEqualStrings = std.testing.expectEqualStrings;
-const expectError = std.testing.expectError;
-
-const max_width: usize = 80;
-
-const FlagDefinition = struct {
-    long_name: ?[]const u8,
-    short_name: ?u8,
-    val_name: ?[]const u8,
-    description: []const u8,
-    // There's different parsing rules if this is a bool (flag) vs string
-    // (option), namely that bools can omit an equals value, and can't be
-    // assigned by a token in the next position.
-    //
-    // Eg: "--bool_flag" and "--bool_flag=true" but not "--bool_flag true"
-    parse_type: enum { Bool, Str },
-    val_ptr: FlagConverter,
-};
-
-fn extractName(token: []const u8) []const u8 {
-    if (std.mem.indexOf(u8, token, "=")) |idx| {
-        return token[0..idx];
-    } else {
-        return token;
-    }
-}
-
-fn extractEqualValue(token: []const u8) ?[]const u8 {
-    if (std.mem.indexOf(u8, token, "=")) |idx| {
-        return token[idx + 1 ..];
-    } else {
-        return null;
-    }
-}
-
-fn extractNextValue(remainder: [][]const u8) ?[]const u8 {
-    if (remainder.len > 0 and !std.mem.startsWith(u8, remainder[0], "-")) {
-        return remainder[0];
-    } else {
-        return null;
-    }
-}
-
-fn getFlagByLongName(flags: []FlagDefinition, flag_name: []const u8) ?FlagDefinition {
-    for (flags) |flag| {
-        if (flag.long_name) |long_name| {
-            if (std.mem.eql(u8, long_name, flag_name)) {
-                return flag;
-            }
-        }
-    }
-
-    return null;
-}
-
-fn getFlagByShortName(flags: []FlagDefinition, flag_name: u8) ?FlagDefinition {
-    for (flags) |flag| {
-        if (flag.short_name) |short_name| {
-            if (short_name == flag_name) {
-                return flag;
-            }
-        }
-    }
-
-    return null;
-}
+const max_width: usize = 80; // TODO: try to figure out the width of the terminal or whatever
 
 pub const Args = CmdArgs(void); // Simple non-subcommand-using option parsing
 
@@ -85,17 +20,21 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
         values: std.ArrayList([]const u8), // Backing array for string arguments
 
         // Basic pattern:
-        // cmd FLAGS... ARGS... EXTRAS...
+        //   cmd FLAGS... ARGS... EXTRAS...
+        //
+        // Both "ARGS" and "EXTRAS" are positional arguments; the difference is
+        // that EXTRAS are overflow, as in (defun cmd (arg0 arg1 &rest extra)).
+        //
+        // ...so, take "grep": the first positional argument is the pattern, the
+        // remaining arguments are which files to search.
 
         flags: std.ArrayList(FlagDefinition), // List of argument patterns
-        args: std.ArrayList(PositionalArg),
+        args: std.ArrayList(PositionalDefinition),
 
         positionals: std.ArrayList([]const u8), // Backing array for all positional arguments
+        positional_extras: ?ExtrasDefinition = null, // Used if we need to capture the positionals that trail args
 
-        // TODO: Is "overflow" a better name?
-        positional_extras: ?ExtrasArg = null, // Used if we need to capture the positionals that trail args
-
-        subcommands: std.ArrayList(SubCommand), // Allow to switch into namespaced command args
+        subcommands: std.ArrayList(SubCommandDefinition), // Allow to switch into namespaced command args
         command_used: ?CommandEnumT,
 
         last_error: ?[]const u8 = null,
@@ -104,19 +43,33 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
 
         const Error = error{ ParseError, OutOfMemory };
 
-        const PositionalArg = struct {
+        const FlagDefinition = struct {
+            long_name: ?[]const u8,
+            short_name: ?u8,
+            val_name: ?[]const u8,
+            description: []const u8,
+            // There's different parsing rules if this is a bool (flag) vs string
+            // (option), namely that bools can omit an equals value, and can't be
+            // assigned by a token in the next position.
+            //
+            // Eg: "--bool_flag" and "--bool_flag=true" but not "--bool_flag true"
+            parse_type: enum { Bool, Str },
+            val_ptr: FlagConverter,
+        };
+
+        const PositionalDefinition = struct {
             name: []const u8,
             description: []const u8,
             conv: FlagConverter,
         };
 
-        const ExtrasArg = struct {
+        const ExtrasDefinition = struct {
             name: []const u8,
             description: []const u8,
             ptr: *[][]const u8,
         };
 
-        const SubCommand = struct {
+        const SubCommandDefinition = struct {
             name: []const u8,
             cmd: CommandEnumT,
             args: Args,
@@ -128,8 +81,8 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                 .values = std.ArrayList([]const u8).init(allocator),
                 .positionals = std.ArrayList([]const u8).init(allocator),
                 .flags = std.ArrayList(FlagDefinition).init(allocator),
-                .args = std.ArrayList(PositionalArg).init(allocator),
-                .subcommands = std.ArrayList(SubCommand).init(allocator),
+                .args = std.ArrayList(PositionalDefinition).init(allocator),
+                .subcommands = std.ArrayList(SubCommandDefinition).init(allocator),
                 .command_used = null,
             };
         }
@@ -275,7 +228,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
 
         /// Configure the name for this program. This only affects "usage"
         /// output; TODO: if omitted, this will be taken from the first argv.
-        pub fn name(self: *Self, program_name: []const u8) void {
+        pub fn programName(self: *Self, program_name: []const u8) void {
             self.program_name = program_name;
         }
 
@@ -293,44 +246,33 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
         ///
         /// Boolean flags have slightly different parsing rules from
         /// string/value flags.
-        pub fn flag(self: *Self, comptime long_name: ?[]const u8, comptime short_name: ?u8, ptr: anytype, description: []const u8) !void {
+        pub fn flag(self: *Self, comptime long_name: ?[]const u8, comptime short_name: ?u8, ptr: anytype) !void {
+            try self.flagDecl(long_name, short_name, ptr, null, "");
+        }
+
+        pub fn flagDecl(self: *Self, comptime long_name: ?[]const u8, comptime short_name: ?u8, ptr: anytype, comptime val_desc: ?[]const u8, comptime description: []const u8) !void {
             if (long_name == null and short_name == null) {
                 @compileError("Must provide at least one name to identify this flag");
             }
-            const is_bool = @TypeOf(ptr) == *bool or @TypeOf(ptr) == *?bool;
 
+            const is_bool = @TypeOf(ptr) == *bool or @TypeOf(ptr) == *?bool;
             const conv = FlagConverter.init(ptr);
 
             try self.flags.append(.{
                 .long_name = long_name,
                 .short_name = short_name,
-                .val_name = conv.tag,
+                .val_name = val_desc orelse conv.tag,
                 .description = description,
                 .parse_type = if (is_bool) .Bool else .Str,
                 .val_ptr = conv,
             });
         }
 
-        /// This is identical to `flag(...)`, with the exception that it lets
-        /// you provide a name for the argument used in the help text. For
-        /// example, passing "<col>" in for `val_name` yields something akin to:
-        ///     -C, --color=<col>
-        pub fn option(self: *Self, comptime long_name: ?[]const u8, comptime short_name: ?u8, ptr: anytype, val_name: []const u8, description: []const u8) !void {
-            if (long_name == null and short_name == null) {
-                @compileError("Must provide at least one name to identify this flag");
-            }
-            const is_bool = @TypeOf(ptr) == *bool or @TypeOf(ptr) == *?bool;
-            try self.flags.append(.{
-                .long_name = long_name,
-                .short_name = short_name,
-                .val_name = val_name,
-                .description = description,
-                .parse_type = if (is_bool) .Bool else .Str,
-                .val_ptr = FlagConverter.init(ptr),
-            });
+        pub fn arg(self: *Self, ptr: anytype) !void {
+            try self.argDecl("", ptr, "");
         }
 
-        pub fn arg(self: *Self, arg_name: []const u8, ptr: anytype, description: []const u8) !void {
+        pub fn argDecl(self: *Self, comptime arg_name: []const u8, ptr: anytype, comptime description: []const u8) !void {
             try self.args.append(.{
                 .name = arg_name, // TODO: Should we piggyback on conv.tag at all?
                 .description = description,
@@ -339,7 +281,11 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
         }
 
         /// Name and bind the non-flag commandline arguments
-        pub fn extras(self: *Self, extras_name: []const u8, ptr: *[][]const u8, description: []const u8) !void {
+        pub fn extra(self: *Self, ptr: *[][]const u8) !void {
+            try self.extraDecl("", ptr, "");
+        }
+
+        pub fn extraDecl(self: *Self, comptime extras_name: []const u8, ptr: *[][]const u8, comptime description: []const u8) !void {
             self.positional_extras = .{
                 .name = extras_name,
                 .description = description,
@@ -348,11 +294,16 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
         }
 
         // For right now, we don't support subcommands of subcommands.
-        pub fn command(self: *Self, command_name: []const u8, cmd: CommandEnumT) !*Args {
+        pub fn command(self: *Self, cmd: CommandEnumT) !*Args {
+            std.debug.print("YYY {s}\n", .{@tagName(cmd)});
+            return try self.commandDecl(@tagName(cmd), cmd);
+        }
+
+        pub fn commandDecl(self: *Self, command_name: []const u8, cmd: CommandEnumT) !*Args {
             if (CommandEnumT == void) {
                 @compileError("Subcommands not allowed against a void command type. Use `CmdArgs` to get this functionality!!");
             }
-            try self.subcommands.append(SubCommand{
+            try self.subcommands.append(SubCommandDefinition{
                 .name = command_name,
                 .cmd = cmd,
                 .args = Args.init(self.allocator),
@@ -623,8 +574,60 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
 
             return action_taken;
         }
+
+        fn extractName(token: []const u8) []const u8 {
+            if (std.mem.indexOf(u8, token, "=")) |idx| {
+                return token[0..idx];
+            } else {
+                return token;
+            }
+        }
+
+        fn extractEqualValue(token: []const u8) ?[]const u8 {
+            if (std.mem.indexOf(u8, token, "=")) |idx| {
+                return token[idx + 1 ..];
+            } else {
+                return null;
+            }
+        }
+
+        fn extractNextValue(remainder: [][]const u8) ?[]const u8 {
+            if (remainder.len > 0 and !std.mem.startsWith(u8, remainder[0], "-")) {
+                return remainder[0];
+            } else {
+                return null;
+            }
+        }
+
+        fn getFlagByLongName(flags: []FlagDefinition, flag_name: []const u8) ?FlagDefinition {
+            for (flags) |defn| {
+                if (defn.long_name) |long_name| {
+                    if (std.mem.eql(u8, long_name, flag_name)) {
+                        return defn;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        fn getFlagByShortName(flags: []FlagDefinition, flag_name: u8) ?FlagDefinition {
+            for (flags) |defn| {
+                if (defn.short_name) |short_name| {
+                    if (short_name == flag_name) {
+                        return defn;
+                    }
+                }
+            }
+
+            return null;
+        }
     };
 }
+
+const expect = std.testing.expect;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;
 
 test "anyflag" {
     var args = Args.init(std.testing.allocator);
@@ -637,12 +640,12 @@ test "anyflag" {
     var flag4: enum { One, Two, Three, Four } = .Three;
     var flag5: ?enum { Red, Orange, Yellow } = null;
 
-    try args.flag("flag0", null, &flag0, "Boolean Opt");
-    try args.flag("flag1", null, &flag1, "Boolean");
-    try args.flag("flag2", null, &flag2, "String Opt");
-    try args.flag("flag3", null, &flag3, "String");
-    try args.flag("flag4", null, &flag4, "Enum");
-    try args.flag("flag5", null, &flag5, "Enum Opt");
+    try args.flag("flag0", null, &flag0);
+    try args.flag("flag1", null, &flag1);
+    try args.flag("flag2", null, &flag2);
+    try args.flag("flag3", null, &flag3);
+    try args.flag("flag4", null, &flag4);
+    try args.flag("flag5", null, &flag5);
 
     var argv = [_][]const u8{
         "--flag0=yes", "--flag1=1", "--flag2=pass", "--flag3=pass", "--flag4=two", "--flag5=YelloW",
@@ -666,10 +669,10 @@ test "Omitted flags get default values" {
     var flag2: ?[]const u8 = null;
     var flag3: ?[]const u8 = "default";
 
-    try args.flag("flag0", 'a', &flag0, "Optional boolean");
-    try args.flag("flag1", 'b', &flag1, "Default true boolean");
-    try args.flag("flag2", 'c', &flag2, "Optional string");
-    try args.flag("flag3", 'd', &flag3, "Defaulted string");
+    try args.flag("flag0", 'a', &flag0);
+    try args.flag("flag1", 'b', &flag1);
+    try args.flag("flag2", 'c', &flag2);
+    try args.flag("flag3", 'd', &flag3);
 
     var argv = [_][]const u8{};
     try args.parseSlice(argv[0..]);
@@ -689,10 +692,10 @@ test "Flags can be set" {
     var flag2: ?[]const u8 = null;
     var flag3: ?[]const u8 = "default";
 
-    try args.flag("flag0", 'a', &flag0, "Optional boolean");
-    try args.flag("flag1", 'b', &flag1, "Default true boolean");
-    try args.flag("flag2", 'c', &flag2, "Optional string");
-    try args.flag("flag3", 'd', &flag3, "Defaulted string");
+    try args.flag("flag0", 'a', &flag0);
+    try args.flag("flag1", 'b', &flag1);
+    try args.flag("flag2", 'c', &flag2);
+    try args.flag("flag3", 'd', &flag3);
 
     var argv = [_][]const u8{ "--flag0", "--flag1", "--flag2", "aaa", "--flag3", "bbb" };
     try args.parseSlice(argv[0..]);
@@ -723,8 +726,8 @@ test "Various ways to set a string value" {
     var flag_equal: ?[]const u8 = null;
     var flag_posn: ?[]const u8 = null;
 
-    try args.flag("flag_equal", 'a', &flag_equal, "flag_equal");
-    try args.flag("flag_posn", 'b', &flag_posn, "flag_posn");
+    try args.flag("flag_equal", 'a', &flag_equal);
+    try args.flag("flag_posn", 'b', &flag_posn);
 
     var argv = [_][]const u8{ "--flag_equal=aaa", "--flag_posn", "bbb" };
     try args.parseSlice(argv[0..]);
@@ -749,8 +752,8 @@ test "Expecting errors on bad input" {
     var flag0: ?bool = null;
     var flag1: ?[]const u8 = null;
 
-    try args.flag("flag0", 'a', &flag0, "flag0");
-    try args.flag("flag1", 'b', &flag1, "flag1");
+    try args.flag("flag0", 'a', &flag0);
+    try args.flag("flag1", 'b', &flag1);
 
     var argv = [_][]const u8{"--flag10=aaa"};
     expectError(error.ParseError, args.parseSlice(argv[0..]));
@@ -778,8 +781,8 @@ test "Missing string argument" {
     var miss0: ?[]const u8 = null;
     var miss1: []const u8 = "";
 
-    try args.flag("miss0", 'm', &miss0, "");
-    try args.flag("miss1", 'n', &miss1, "");
+    try args.flag("miss0", 'm', &miss0);
+    try args.flag("miss1", 'n', &miss1);
 
     // There's four codepaths for this error...
 
@@ -807,12 +810,12 @@ test "Various ways to set a boolean to true" {
     var flag_y: ?bool = null;
     var flag_1: ?bool = null;
 
-    try args.flag("flag_basic", 'a', &flag_basic, "flag_basic");
-    try args.flag("flag_true", 'b', &flag_true, "flag_true");
-    try args.flag("flag_yes", 'c', &flag_yes, "flag_yes");
-    try args.flag("flag_on", 'd', &flag_on, "flag_on");
-    try args.flag("flag_y", 'e', &flag_y, "flag_y");
-    try args.flag("flag_1", 'f', &flag_1, "flag_1");
+    try args.flag("flag_basic", 'a', &flag_basic);
+    try args.flag("flag_true", 'b', &flag_true);
+    try args.flag("flag_yes", 'c', &flag_yes);
+    try args.flag("flag_on", 'd', &flag_on);
+    try args.flag("flag_y", 'e', &flag_y);
+    try args.flag("flag_1", 'f', &flag_1);
 
     var argv = [_][]const u8{
         "--flag_basic", "--flag_true=true", "--flag_yes=yes",
@@ -856,12 +859,12 @@ test "Various ways to set a boolean to false" {
     var flag_y: ?bool = null;
     var flag_1: ?bool = null;
 
-    try args.flag("flag_basic", 'a', &flag_basic, "flag_basic");
-    try args.flag("flag_true", 'b', &flag_true, "flag_true");
-    try args.flag("flag_yes", 'c', &flag_yes, "flag_yes");
-    try args.flag("flag_on", 'd', &flag_on, "flag_on");
-    try args.flag("flag_y", 'e', &flag_y, "flag_y");
-    try args.flag("flag_1", 'f', &flag_1, "flag_1");
+    try args.flag("flag_basic", 'a', &flag_basic);
+    try args.flag("flag_true", 'b', &flag_true);
+    try args.flag("flag_yes", 'c', &flag_yes);
+    try args.flag("flag_on", 'd', &flag_on);
+    try args.flag("flag_y", 'e', &flag_y);
+    try args.flag("flag_1", 'f', &flag_1);
 
     var argv = [_][]const u8{
         "--flag_true=false", "--flag_yes=no",
@@ -909,15 +912,15 @@ test "Number support" {
     var flag6: i32 = 0;
     var flag7: ?i64 = null;
 
-    try args.flag("flag0", null, &flag0, "");
-    try args.flag("flag1", null, &flag1, "");
-    try args.flag("flag2", null, &flag2, "");
-    try args.flag("flag3", null, &flag3, "");
+    try args.flag("flag0", null, &flag0);
+    try args.flag("flag1", null, &flag1);
+    try args.flag("flag2", null, &flag2);
+    try args.flag("flag3", null, &flag3);
 
-    try args.flag("flag4", null, &flag4, "");
-    try args.flag("flag5", null, &flag5, "");
-    try args.flag("flag6", null, &flag6, "");
-    try args.flag("flag7", null, &flag7, "");
+    try args.flag("flag4", null, &flag4);
+    try args.flag("flag5", null, &flag5);
+    try args.flag("flag6", null, &flag6);
+    try args.flag("flag7", null, &flag7);
 
     var argv = [_][]const u8{
         "--flag0=1",  "--flag1=1", "--flag2=300000", "--flag3=300000",
@@ -953,18 +956,18 @@ test "Mashing together short opts" {
     var flag_h: ?bool = null;
     var flag_i: ?[]const u8 = null;
 
-    try args.flag(null, 'a', &flag_a, "");
-    try args.flag(null, 'b', &flag_b, "");
-    try args.flag(null, 'c', &flag_c, "");
+    try args.flag(null, 'a', &flag_a);
+    try args.flag(null, 'b', &flag_b);
+    try args.flag(null, 'c', &flag_c);
 
-    try args.flag(null, 'd', &flag_d, "");
-    try args.flag(null, 'e', &flag_e, "");
+    try args.flag(null, 'd', &flag_d);
+    try args.flag(null, 'e', &flag_e);
 
-    try args.flag(null, 'f', &flag_f, "");
-    try args.flag(null, 'g', &flag_g, "");
+    try args.flag(null, 'f', &flag_f);
+    try args.flag(null, 'g', &flag_g);
 
-    try args.flag(null, 'h', &flag_h, "");
-    try args.flag(null, 'i', &flag_i, "");
+    try args.flag(null, 'h', &flag_h);
+    try args.flag(null, 'i', &flag_i);
 
     var argv = [_][]const u8{ "-abc=no", "-d=pass", "-e", "pass", "-fg=pass", "-hi", "pass" };
     try args.parseSlice(argv[0..]);
@@ -989,17 +992,29 @@ test "Positional functionality" {
 
     var flag0: bool = false;
     var flag1: u16 = 0;
+    var arg0: []const u8 = "";
+    var arg1: ?u64 = null;
     var files: [][]const u8 = undefined;
 
-    try args.flag("flag0", null, &flag0, "");
-    try args.flag("flag1", null, &flag1, "");
-    try args.args("FILE", &files);
+    try args.flag("flag0", null, &flag0);
+    try args.flag("flag1", null, &flag1);
+    try args.arg(&arg0);
+    try args.arg(&arg1);
+    try args.extra(&files);
 
-    var argv = [_][]const u8{ "--flag0", "--flag1", "1234", "one.txt", "two.txt" };
+    var argv_missing = [_][]const u8{};
+    try args.parseSlice(argv_missing[0..]);
+    expect(arg0.len == 0);
+    expect(arg1 == null);
+    expect(files.len == 0);
+
+    var argv = [_][]const u8{ "--flag0", "--flag1", "1234", "*.txt", "200000", "one.txt", "two.txt" };
     try args.parseSlice(argv[0..]);
 
     expect(flag0);
     expect(flag1 == 1234);
+    expectEqualStrings("*.txt", arg0);
+    expect(arg1.? == 200000);
     expect(files.len == 2);
     expectEqualStrings("one.txt", files[0]);
     expectEqualStrings("two.txt", files[1]);
@@ -1015,24 +1030,24 @@ test "Basic SubCommands" {
     defer opts.deinit();
 
     const MoveCfg = struct {
-        x: []const u8 = "",
-        y: []const u8 = "",
+        x: i32 = 0,
+        y: i32 = 0,
     };
 
     var move_cfg: MoveCfg = .{};
 
-    var move_opts = try opts.command("move", Cmd.Move);
-    try move_opts.flag(null, 'x', &move_cfg.x, "X position");
-    try move_opts.flag(null, 'y', &move_cfg.y, "Y position");
+    var move_opts = try opts.commandDecl("move", Cmd.Move);
+    try move_opts.flag(null, 'x', &move_cfg.x);
+    try move_opts.flag(null, 'y', &move_cfg.y);
 
     const TurnCfg = struct {
-        angle: []const u8 = "",
+        angle: i32 = 0,
     };
 
     var turn_cfg: TurnCfg = .{};
 
-    var turn_opts = try opts.command("turn", Cmd.Turn);
-    try turn_opts.flag("angle", 'a', &turn_cfg.angle, "How far to turn");
+    var turn_opts = try opts.commandDecl("turn", Cmd.Turn);
+    try turn_opts.flag("angle", 'a', &turn_cfg.angle);
 
     var argv1 = [_][]const u8{ "move", "-x=10", "-y", "20" };
     try opts.parseSlice(argv1[0..]);
@@ -1040,8 +1055,8 @@ test "Basic SubCommands" {
     if (opts.getCommand()) |cmd| {
         switch (cmd) {
             .Move => {
-                expectEqualStrings(move_cfg.x, "10");
-                expectEqualStrings(move_cfg.y, "20");
+                expect(move_cfg.x == 10);
+                expect(move_cfg.y == 20);
             },
             .Turn => @panic("Found turn!"),
         }
@@ -1055,14 +1070,14 @@ test "Basic SubCommands" {
     if (opts.getCommand()) |cmd| switch (cmd) {
         .Move => @panic("Found move!"),
         .Turn => {
-            expectEqualStrings(turn_cfg.angle, "270");
+            expect(turn_cfg.angle == 270);
         },
     } else {
         @panic("No subcommands were run!");
     }
 
     var args: [][]const u8 = undefined;
-    try opts.args("ARG", &args);
+    try opts.extra(&args);
 
     var argv3 = [_][]const u8{ "no", "subcommand", "specified" };
     try opts.parseSlice(argv3[0..]);

@@ -42,23 +42,22 @@ pub fn main() !void {
         \\or find (although, to be fair, it does much, much less).
     );
 
-    try args.flag("color", 'c', &cfg.use_color, "Enable use of color (default is Auto)");
-    try args.flag("files", 'f', &cfg.print_files, "Print files");
-    try args.flag("paths", 'p', &cfg.print_paths, "Print paths");
-    try args.flag("hidden", 'H', &cfg.include_hidden, "Include hidden files/paths");
-    try args.option("exts", 'e', &cfg.exts, "E1[,E2...]",
+    try args.flagDecl("color", 'c', &cfg.use_color, null, "Enable use of color (default is Auto)");
+    try args.flagDecl("files", 'f', &cfg.print_files, null, "Print files");
+    try args.flagDecl("paths", 'p', &cfg.print_paths, null, "Print paths");
+    try args.flagDecl("hidden", 'H', &cfg.include_hidden, null, "Include hidden files/paths");
+    try args.flagDecl("exts", 'e', &cfg.exts, "E1[,E2...]",
         \\Comma-separated list of extensions. If specified, only
         \\files with the given extensions will be printed. Implies
         \\`--files`.
     );
+    var show_usage: bool = false;
+    try args.flagDecl("help", 'h', &show_usage, null, "Display this help message");
 
-    try args.arg("[PATTERN]", &cfg.match_pattern, "Only print files whose name matches this pattern.");
-    try args.extras("[PATH]", &cfg.paths,
+    try args.argDecl("[PATTERN]", &cfg.match_pattern, "Only print files whose name matches this pattern.");
+    try args.extraDecl("[PATH]", &cfg.paths,
         \\List files in the provided paths (default is the current working directory)
     );
-
-    var show_usage: bool = false;
-    try args.flag("help", 'h', &show_usage, "Display this help message");
 
     args.parse() catch args.printUsageAndDie();
 
