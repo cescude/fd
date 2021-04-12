@@ -87,6 +87,11 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             };
         }
 
+        pub fn takeover(self: *Self, T: CommandEnumT) void {
+            var other = CmdArgs(T);
+            self = other; // Will this work?
+        }
+
         pub fn deinit(self: *Self) void {
             for (self.values.items) |str| {
                 self.allocator.free(str);

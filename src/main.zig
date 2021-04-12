@@ -35,6 +35,10 @@ pub fn main() !void {
         else => &gpa.allocator,
     };
 
+    // var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    // defer arena.deinit();
+    // const allocator = &arena.allocator;
+
     var args = Args.init(allocator);
     defer args.deinit();
 
@@ -90,8 +94,7 @@ pub fn main() !void {
         cfg.print_paths = true;
     }
 
-    var proc = Proc(@TypeOf(writer)).init(allocator, cfg, &writer);
-    nosuspend try proc.run(cwd);
+    nosuspend try run(cfg, writer, allocator, cwd);
 }
 
 const Entry = std.fs.Dir.Entry;
@@ -181,7 +184,7 @@ const ScanResults = struct {
 // Make sure the memory allocated for ScanResults is taken care of!
 // => paths needs to be deinit'd, and its contents free'd
 // => files needs to be deinit'd, and its contents free'd
-fn scanPath(allocator: *std.mem.Allocator, path: []const u8) callconv(.Async) !ScanResults {
+fn scanPath(allocator: *std.mem.Allocator, path: []const u8) !ScanResults {
     var paths = ArrayList([]const u8).init(allocator);
     var files = ArrayList(Entry).init(allocator);
 
@@ -222,142 +225,144 @@ fn scanPath(allocator: *std.mem.Allocator, path: []const u8) callconv(.Async) !S
     };
 }
 
-fn Proc(comptime WriterType: type) type {
-    return struct {
-        allocator: *std.mem.Allocator,
-        cfg: Config,
-        writer: *WriterType,
+const Style = enum {
+    Prefix,
+    Default,
+    SymLink,
+    AccessDenied,
+    Unknown,
+};
 
-        const Self = @This();
-
-        pub fn init(allocator: *std.mem.Allocator, cfg: Config, writer: *WriterType) Self {
-            return .{
-                .allocator = allocator,
-                .cfg = cfg,
-                .writer = writer,
-            };
+pub fn styled(cfg: Config, writer: anytype, comptime style: Style, str: []const u8, comptime suffix: []const u8) !void {
+    if (cfg.use_color == .On) {
+        switch (style) {
+            .Prefix => try writer.print("\u{001b}[1m{s}{s}\u{001b}[0m", .{ str, suffix }),
+            .Default, .Unknown => try writer.print("{s}{s}", .{ str, suffix }),
+            .SymLink => try writer.print("\u{001b}[31;1m\u{001b}[7m{s}\u{001b}[0m{s}", .{ str, suffix }),
+            .AccessDenied => try writer.print("\u{001b}[41;1m\u{001b}[37;1m{s}\u{001b}[0m{s}", .{ str, suffix }),
         }
+    } else {
+        switch (style) {
+            .Prefix => try writer.print("{s}{s}", .{ str, suffix }),
+            else => try writer.print("{s}{s}", .{ str, suffix }),
+        }
+    }
+}
 
-        const Style = enum {
-            Prefix,
-            Default,
-            SymLink,
-            AccessDenied,
-            Unknown,
-        };
+// Strip the `root` prefix from `path`
+pub fn dropRoot(root: []const u8, path: []const u8) []const u8 {
+    // Let's assume sep is always a single character...
+    if (root[root.len - 1] == sep[0]) {
+        return path[root.len..];
+    } else {
+        return path[root.len + 1 ..];
+    }
+}
 
-        pub fn styled(self: *Self, comptime style: Style, str: []const u8, comptime suffix: []const u8) !void {
-            if (self.cfg.use_color == .On) {
-                switch (style) {
-                    .Prefix => try self.writer.print("\u{001b}[1m{s}{s}\u{001b}[0m", .{ str, suffix }),
-                    .Default, .Unknown => try self.writer.print("{s}{s}", .{ str, suffix }),
-                    .SymLink => try self.writer.print("\u{001b}[31;1m\u{001b}[7m{s}\u{001b}[0m{s}", .{ str, suffix }),
-                    .AccessDenied => try self.writer.print("\u{001b}[41;1m\u{001b}[37;1m{s}\u{001b}[0m{s}", .{ str, suffix }),
-                }
-            } else {
-                switch (style) {
-                    .Prefix => try self.writer.print("{s}{s}", .{ str, suffix }),
-                    else => try self.writer.print("{s}{s}", .{ str, suffix }),
-                }
+const Stack = std.SinglyLinkedList(@Frame(scanPath));
+
+pub fn run(cfg: Config, writer: anytype, allocator: *std.mem.Allocator, root: []const u8) !void {
+    var scan_results = Stack{};
+    defer {
+        while (scan_results.popFirst()) |n| {
+            allocator.destroy(n);
+        }
+    }
+
+    {
+        var path_dup = try allocator.dupe(u8, root);
+        errdefer allocator.free(path_dup);
+
+        var node = try allocator.create(Stack.Node);
+        errdefer allocator.destroy(node);
+
+        node.data = async scanPath(allocator, path_dup);
+
+        scan_results.prepend(node);
+    }
+
+    while (scan_results.popFirst()) |node| {
+        defer allocator.destroy(node);
+
+        const sr = try await node.data;
+
+        defer {
+            allocator.free(sr.path);
+
+            // The path strings themselves need to stick around to be
+            // used in future ScanResults (eventually free'd by the
+            // prior call).
+            sr.paths.deinit();
+
+            // Not so with the file variables...
+            for (sr.files.items) |f| {
+                allocator.free(f.name);
             }
+            sr.files.deinit();
         }
 
-        // Strip the `root` prefix from `path`
-        pub fn dropRoot(root: []const u8, path: []const u8) []const u8 {
-            // Let's assume sep is always a single character...
-            if (root[root.len - 1] == sep[0]) {
-                return path[root.len..];
-            } else {
-                return path[root.len + 1 ..];
+        if (cfg.print_paths and scan_results.first != null) {
+            try styled(cfg, writer, Style.Prefix, dropRoot(root, sr.path), "");
+            try styled(cfg, writer, Style.Default, "", "\n");
+        }
+
+        for (sr.paths.items) |path| {
+            const fname = std.fs.path.basename(path);
+            if (fname[0] == '.' and !cfg.include_hidden) {
+                allocator.free(path);
+                continue;
             }
+
+            errdefer allocator.free(path);
+
+            var node0 = try allocator.create(Stack.Node);
+            errdefer allocator.destroy(node0);
+
+            node0.data = async scanPath(allocator, path);
+
+            scan_results.prepend(node0);
         }
 
-        pub fn run(self: *Self, root: []const u8) callconv(.Async) !void {
+        if (cfg.print_files) {
+            for (sr.files.items) |file| {
+                if (file.name[0] == '.' and !cfg.include_hidden) continue;
 
-            // var scan_results = ArrayList(@Frame(scanPath)).init(self.allocator);
-            var scan_results = ArrayList(ScanResults).init(self.allocator);
-            defer scan_results.deinit();
-
-            // try scan_results.append(async scanPath(self.allocator, try self.allocator.dupe(u8, root)));
-            try scan_results.append(try scanPath(self.allocator, try self.allocator.dupe(u8, root)));
-
-            while (scan_results.items.len > 0) {
-                var frame = scan_results.pop();
-                // var sr = try await frame;
-                var sr = frame;
-                defer {
-                    self.allocator.free(sr.path);
-
-                    // The path strings themselves need to stick around to be
-                    // used in future ScanResults (eventually free'd by the
-                    // prior call).
-                    sr.paths.deinit();
-
-                    // Not so with the file variables...
-                    for (sr.files.items) |f| {
-                        self.allocator.free(f.name);
-                    }
-                    sr.files.deinit();
-                }
-
-                if (self.cfg.print_paths and scan_results.items.len > 0) {
-                    try self.styled(Style.Prefix, dropRoot(root, sr.path), "");
-                    try self.styled(Style.Default, "", "\n");
-                }
-
-                for (sr.paths.items) |path| {
-                    const fname = std.fs.path.basename(path);
-                    if (fname[0] == '.' and !self.cfg.include_hidden) {
-                        self.allocator.free(path);
+                if (cfg.exts) |exts| {
+                    const file_ext = std.fs.path.extension(file.name);
+                    if (file_ext.len == 0) {
+                        // No extension? Definitely not going to match anything...
                         continue;
                     }
 
-                    // try scan_results.append(async scanPath(self.allocator, path));
-                    try scan_results.append(try scanPath(self.allocator, path));
+                    var ext_match = false;
+
+                    var it = std.mem.tokenize(exts, ",");
+                    while (it.next()) |ext| {
+                        // file_ext is always preceded by a `.` here
+                        ext_match = ext_match or std.mem.eql(u8, ext, file_ext[1..]);
+                    }
+
+                    if (!ext_match) {
+                        // None of the extensions matched, move to the next file
+                        continue;
+                    }
                 }
 
-                if (self.cfg.print_files) {
-                    for (sr.files.items) |file| {
-                        if (file.name[0] == '.' and !self.cfg.include_hidden) continue;
+                const str = dropRoot(root, file.name);
+                const dname = std.fs.path.dirname(str);
+                const fname = std.fs.path.basename(str);
 
-                        if (self.cfg.exts) |exts| {
-                            const file_ext = std.fs.path.extension(file.name);
-                            if (file_ext.len == 0) {
-                                // No extension? Definitely not going to match anything...
-                                continue;
-                            }
+                if (dname) |ss| {
+                    try styled(cfg, writer, Style.Prefix, ss, sep);
+                }
 
-                            var ext_match = false;
-
-                            var it = std.mem.tokenize(exts, ",");
-                            while (it.next()) |ext| {
-                                // file_ext is always preceded by a `.` here
-                                ext_match = ext_match or std.mem.eql(u8, ext, file_ext[1..]);
-                            }
-
-                            if (!ext_match) {
-                                // None of the extensions matched, move to the next file
-                                continue;
-                            }
-                        }
-
-                        const str = dropRoot(root, file.name);
-                        const dname = std.fs.path.dirname(str);
-                        const fname = std.fs.path.basename(str);
-
-                        if (dname) |ss| {
-                            try self.styled(Style.Prefix, ss, sep);
-                        }
-
-                        switch (file.kind) {
-                            .Directory => unreachable,
-                            .File => try self.styled(Style.Default, fname, "\n"),
-                            .SymLink => try self.styled(Style.SymLink, fname, "\n"),
-                            else => try self.styled(Style.Unknown, fname, "\n"),
-                        }
-                    }
+                switch (file.kind) {
+                    .Directory => unreachable,
+                    .File => try styled(cfg, writer, Style.Default, fname, "\n"),
+                    .SymLink => try styled(cfg, writer, Style.SymLink, fname, "\n"),
+                    else => try styled(cfg, writer, Style.Unknown, fname, "\n"),
                 }
             }
         }
-    };
+    }
 }
