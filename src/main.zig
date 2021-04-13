@@ -25,8 +25,6 @@ pub fn main() !void {
     var outs = std.io.bufferedWriter(stdout.writer());
     defer outs.flush() catch {};
 
-    var writer = outs.writer();
-
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(!gpa.deinit());
 
@@ -94,7 +92,7 @@ pub fn main() !void {
         cfg.print_paths = true;
     }
 
-    nosuspend try run(cfg, writer, allocator, cwd);
+    try run(cfg, outs, allocator, cwd);
 }
 
 const Entry = std.fs.Dir.Entry;
@@ -261,7 +259,10 @@ pub fn dropRoot(root: []const u8, path: []const u8) []const u8 {
 
 const Stack = std.SinglyLinkedList(@Frame(scanPath));
 
-pub fn run(cfg: Config, writer: anytype, allocator: *std.mem.Allocator, root: []const u8) !void {
+pub fn run(cfg: Config, _out_stream: anytype, allocator: *std.mem.Allocator, root: []const u8) !void {
+    var out_stream = _out_stream;
+    var writer = out_stream.writer();
+
     var scan_results = Stack{};
     defer {
         while (scan_results.popFirst()) |n| {
@@ -304,6 +305,7 @@ pub fn run(cfg: Config, writer: anytype, allocator: *std.mem.Allocator, root: []
         if (cfg.print_paths and scan_results.first != null) {
             try styled(cfg, writer, Style.Prefix, dropRoot(root, sr.path), "");
             try styled(cfg, writer, Style.Default, "", "\n");
+            try out_stream.flush();
         }
 
         for (sr.paths.items) |path| {
@@ -362,6 +364,8 @@ pub fn run(cfg: Config, writer: anytype, allocator: *std.mem.Allocator, root: []
                     .SymLink => try styled(cfg, writer, Style.SymLink, fname, "\n"),
                     else => try styled(cfg, writer, Style.Unknown, fname, "\n"),
                 }
+
+                try out_stream.flush();
             }
         }
     }
