@@ -55,8 +55,8 @@ pub fn main() !void {
         \\`--files`.
     );
 
-    var num_threads: u64 = std.Thread.cpuCount() catch 4;
-    try args.flagDecl("num-threads", 'N', &num_threads, null, "Number of threads to use for scan (default is cpu-count)");
+    var num_threads: u64 = std.math.max(2, (std.Thread.cpuCount() catch 1) / 2);
+    try args.flagDecl("num-threads", 'N', &num_threads, null, "Number of threads to use (default is cpus/2)");
 
     var show_usage: bool = false;
     try args.flagDecl("help", 'h', &show_usage, null, "Display this help message");
@@ -96,7 +96,7 @@ pub fn main() !void {
         cfg.print_paths = true;
     }
 
-    try startThreads(allocator, num_threads);
+    try startThreads(allocator, num_threads - 1);
     try run(cfg, outs, allocator, cwd);
 }
 
@@ -157,10 +157,7 @@ pub fn styled(cfg: Config, writer: anytype, comptime style: Style, str: []const 
             .AccessDenied => try writer.print("\u{001b}[41;1m\u{001b}[37;1m{s}\u{001b}[0m{s}", .{ str, suffix }),
         }
     } else {
-        switch (style) {
-            .Prefix => try writer.print("{s}{s}", .{ str, suffix }),
-            else => try writer.print("{s}{s}", .{ str, suffix }),
-        }
+        try writer.print("{s}{s}", .{ str, suffix });
     }
 }
 
@@ -239,16 +236,16 @@ fn thread(ctx: struct {
     allocator: *std.mem.Allocator,
 }) noreturn {
     const id = ctx.id;
-    // std.debug.print("Starting thread #{d}\n", .{id});
+
     while (true) {
         var lock = job_queue_lock.acquire();
-        defer lock.release();
+        var maybe_node = job_queue.popFirst();
+        lock.release();
 
-        if (job_queue.popFirst()) |node| {
+        if (maybe_node) |node| {
             defer ctx.allocator.destroy(node);
 
             const sr: *ScanResults = node.data;
-            // std.debug.print("Thread {d} scanning...{*} {s}\n", .{ id, sr, node.data.path });
             scanPath(sr) catch |err| std.debug.print("ERROR (thread={d}): {}\n", .{ id, err });
         }
     }
@@ -310,19 +307,17 @@ pub fn run(cfg: Config, _out_stream: anytype, allocator: *std.mem.Allocator, roo
 
         scan_results.prepend(node);
 
-        var lock = job_queue_lock.acquire();
-        defer lock.release();
-
         var job_node = try allocator.create(JobQueue.Node);
         errdefer allocator.destroy(job_node);
 
         job_node.data = &node.data;
 
+        var lock = job_queue_lock.acquire();
         job_queue.prepend(job_node);
+        lock.release();
     }
 
     while (scan_results.popFirst()) |node| {
-        // std.debug.print("SCAN RESULTS SIZE #{d}\n", .{scan_results.len()});
         defer {
             node.data.deinit();
             allocator.destroy(node);
@@ -331,12 +326,12 @@ pub fn run(cfg: Config, _out_stream: anytype, allocator: *std.mem.Allocator, roo
         const sr = &node.data;
         sr.wait();
 
-        // std.debug.print("RUNNER: found results for {*} {s}, files={d} paths={d}\n", .{ sr, sr.path, sr.files.items.len, sr.paths.items.len });
+        var needs_flush = false;
 
         if (cfg.print_paths and scan_results.first != null) {
             try styled(cfg, writer, Style.Prefix, dropRoot(root, sr.path), "");
             try styled(cfg, writer, Style.Default, "", "\n");
-            try out_stream.flush();
+            needs_flush = true;
         }
 
         for (sr.paths.items) |path| {
@@ -353,23 +348,15 @@ pub fn run(cfg: Config, _out_stream: anytype, allocator: *std.mem.Allocator, roo
 
             scan_results.prepend(node0);
 
-            // std.debug.print("!!!!11111 #{d}\n", .{scan_results.len()});
-
-            var lock = job_queue_lock.acquire();
-            defer lock.release();
-
-            // std.debug.print("!!!!22222 #{d}\n", .{scan_results.len()});
-
             var job_node = try allocator.create(JobQueue.Node);
             errdefer allocator.destroy(job_node);
 
             job_node.data = &node0.data;
 
+            var lock = job_queue_lock.acquire();
             job_queue.prepend(job_node);
-            // std.debug.print("!!!!33333 #{d}\n", .{scan_results.len()});
+            lock.release();
         }
-
-        // std.debug.print("SCAN RESULTS SIZE NOW #{d}\n", .{scan_results.len()});
 
         if (cfg.print_files) {
             for (sr.files.items) |file| {
@@ -410,9 +397,13 @@ pub fn run(cfg: Config, _out_stream: anytype, allocator: *std.mem.Allocator, roo
                     .SymLink => try styled(cfg, writer, Style.SymLink, fname, "\n"),
                     else => try styled(cfg, writer, Style.Unknown, fname, "\n"),
                 }
-
-                try out_stream.flush();
             }
+
+            needs_flush = sr.files.items.len > 0;
+        }
+
+        if (needs_flush) {
+            try out_stream.flush();
         }
     }
 }
