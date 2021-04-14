@@ -54,6 +54,10 @@ pub fn main() !void {
         \\files with the given extensions will be printed. Implies
         \\`--files`.
     );
+
+    var num_threads: u64 = std.Thread.cpuCount() catch 4;
+    try args.flagDecl("num-threads", 'N', &num_threads, null, "Number of threads to use for scan (default is cpu-count)");
+
     var show_usage: bool = false;
     try args.flagDecl("help", 'h', &show_usage, null, "Display this help message");
 
@@ -92,6 +96,7 @@ pub fn main() !void {
         cfg.print_paths = true;
     }
 
+    try startThreads(allocator, num_threads);
     try run(cfg, outs, allocator, cwd);
 }
 
@@ -135,94 +140,6 @@ fn entryGt(v: void, e0: Entry, e1: Entry) bool {
     return strGt(v, e0.name, e1.name);
 }
 
-// test "Sorting functions don't crash on 1024+ items" {
-//     var items: [1024][]const u8 = undefined;
-//     for (items) |_, idx| {
-//         items[idx] = try std.fmt.allocPrint(std.testing.allocator, "{d}", .{idx});
-//     }
-//     defer for (items) |i| {
-//         std.testing.allocator.free(i);
-//     };
-
-//     // Had a bad implementation of strGt (`sort` crashes if gte instead of gt),
-//     // make sure that doesn't slip up again.
-
-//     _ = std.sort.sort([]const u8, items[0..], {}, strLt);
-//     _ = std.sort.sort([]const u8, items[0..], {}, strGt);
-// }
-
-// test "Sorting panics on >1023 items" {
-//     var items: [1024]usize = undefined;
-//     for (items) |_, idx| {
-//         items[idx] = idx;
-//     }
-
-//     const impl = struct {
-//         fn lt(_: void, a: usize, b: usize) bool {
-//             return a < b;
-//         }
-//         fn lte(_: void, a: usize, b: usize) bool {
-//             return a <= b;
-//         }
-//     };
-
-//     _ = std.sort.sort(usize, items[0..1023], {}, impl.lt); // ok
-//     _ = std.sort.sort(usize, items[0..1023], {}, impl.lte); // ok
-
-//     _ = std.sort.sort(usize, items[0..], {}, impl.lt); // ok
-//     _ = std.sort.sort(usize, items[0..], {}, impl.lte); // panic!
-// }
-
-const ScanResults = struct {
-    path: []const u8,
-    paths: ArrayList([]const u8),
-    files: ArrayList(Entry),
-};
-
-// Make sure the memory allocated for ScanResults is taken care of!
-// => paths needs to be deinit'd, and its contents free'd
-// => files needs to be deinit'd, and its contents free'd
-fn scanPath(allocator: *std.mem.Allocator, path: []const u8) !ScanResults {
-    var paths = ArrayList([]const u8).init(allocator);
-    var files = ArrayList(Entry).init(allocator);
-
-    var dir = std.fs.openDirAbsolute(path, .{
-        .iterate = true,
-        .no_follow = true,
-    }) catch |err| switch (err) {
-        error.AccessDenied => return ScanResults{
-            .path = path,
-            .paths = paths,
-            .files = files,
-        },
-        else => return err,
-    };
-    defer dir.close();
-
-    var iter = dir.iterate();
-    while (try iter.next()) |p| {
-        var qqq = [_][]const u8{ path, p.name };
-        var joined = try std.fs.path.join(allocator, qqq[0..]);
-
-        switch (p.kind) {
-            .Directory => try paths.append(joined),
-            else => try files.append(Entry{ .kind = p.kind, .name = joined }),
-        }
-    }
-
-    // Sort paths z-a (since we pluck them off back-to-front, above)
-    _ = std.sort.sort([]const u8, paths.items, {}, strGt);
-
-    // Sort files a-z (since we iterate over them normally)
-    _ = std.sort.sort(Entry, files.items, {}, entryLt);
-
-    return ScanResults{
-        .path = path,
-        .paths = paths,
-        .files = files,
-    };
-}
-
 const Style = enum {
     Prefix,
     Default,
@@ -234,7 +151,7 @@ const Style = enum {
 pub fn styled(cfg: Config, writer: anytype, comptime style: Style, str: []const u8, comptime suffix: []const u8) !void {
     if (cfg.use_color == .On) {
         switch (style) {
-            .Prefix => try writer.print("\u{001b}[1m{s}{s}\u{001b}[0m", .{ str, suffix }),
+            .Prefix => try writer.print("\u{001b}[36m{s}{s}\u{001b}[0m", .{ str, suffix }),
             .Default, .Unknown => try writer.print("{s}{s}", .{ str, suffix }),
             .SymLink => try writer.print("\u{001b}[31;1m\u{001b}[7m{s}\u{001b}[0m{s}", .{ str, suffix }),
             .AccessDenied => try writer.print("\u{001b}[41;1m\u{001b}[37;1m{s}\u{001b}[0m{s}", .{ str, suffix }),
@@ -257,50 +174,164 @@ pub fn dropRoot(root: []const u8, path: []const u8) []const u8 {
     }
 }
 
-const Stack = std.SinglyLinkedList(@Frame(scanPath));
+const ScanResults = struct {
+    lock: std.Thread.ResetEvent,
+    path: []const u8,
+    paths: ArrayList([]const u8),
+    files: ArrayList(Entry),
+    allocator: *std.mem.Allocator,
+
+    const Self = @This();
+
+    pub fn init(a: *std.mem.Allocator, p: []const u8) !Self {
+        var self = Self{
+            .lock = undefined,
+            .path = try a.dupe(u8, p),
+            .paths = ArrayList([]const u8).init(a),
+            .files = ArrayList(Entry).init(a),
+            .allocator = a,
+        };
+        try self.lock.init();
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.lock.deinit();
+
+        self.allocator.free(self.path);
+
+        for (self.paths.items) |path| {
+            self.allocator.free(path);
+        }
+        self.paths.deinit();
+
+        for (self.files.items) |entry| {
+            self.allocator.free(entry.name);
+        }
+        self.files.deinit();
+    }
+
+    pub fn wait(self: *Self) void {
+        self.lock.wait();
+    }
+
+    pub fn ready(self: *Self) void {
+        self.lock.set();
+    }
+};
+
+const JobQueue = std.SinglyLinkedList(*ScanResults);
+var job_queue = JobQueue{};
+var job_queue_lock = std.Thread.Mutex{};
+
+fn startThreads(a: *std.mem.Allocator, num_threads: u64) !void {
+    var idx: u64 = 0;
+    while (idx < num_threads) : (idx += 1) {
+        _ = try std.Thread.spawn(thread, .{
+            .id = idx,
+            .allocator = a,
+        });
+    }
+}
+
+fn thread(ctx: struct {
+    id: usize,
+    allocator: *std.mem.Allocator,
+}) noreturn {
+    const id = ctx.id;
+    // std.debug.print("Starting thread #{d}\n", .{id});
+    while (true) {
+        var lock = job_queue_lock.acquire();
+        defer lock.release();
+
+        if (job_queue.popFirst()) |node| {
+            defer ctx.allocator.destroy(node);
+
+            const sr: *ScanResults = node.data;
+            // std.debug.print("Thread {d} scanning...{*} {s}\n", .{ id, sr, node.data.path });
+            scanPath(sr) catch |err| std.debug.print("ERROR (thread={d}): {}\n", .{ id, err });
+        }
+    }
+}
+
+fn scanPath(sr: *ScanResults) !void {
+    defer sr.ready();
+
+    var path = sr.path;
+    var paths = &sr.paths;
+    var files = &sr.files;
+
+    var dir = std.fs.openDirAbsolute(path, .{
+        .iterate = true,
+        .no_follow = true,
+    }) catch |err| switch (err) {
+        error.AccessDenied => return,
+        else => return err,
+    };
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (try iter.next()) |p| {
+        var qqq = [_][]const u8{ path, p.name };
+        var joined = try std.fs.path.join(sr.allocator, qqq[0..]);
+
+        switch (p.kind) {
+            .Directory => try paths.append(joined),
+            else => try files.append(Entry{ .kind = p.kind, .name = joined }),
+        }
+    }
+
+    // Sort paths z-a (since we pluck them off back-to-front, above)
+    _ = std.sort.sort([]const u8, paths.items, {}, strGt);
+
+    // Sort files a-z (since we iterate over them normally)
+    _ = std.sort.sort(Entry, files.items, {}, entryLt);
+}
 
 pub fn run(cfg: Config, _out_stream: anytype, allocator: *std.mem.Allocator, root: []const u8) !void {
+    var scan_results = std.SinglyLinkedList(ScanResults){};
+
     var out_stream = _out_stream;
     var writer = out_stream.writer();
 
-    var scan_results = Stack{};
     defer {
         while (scan_results.popFirst()) |n| {
+            n.data.deinit();
             allocator.destroy(n);
         }
     }
 
     {
-        var path_dup = try allocator.dupe(u8, root);
-        errdefer allocator.free(path_dup);
-
-        var node = try allocator.create(Stack.Node);
+        var node = try allocator.create(std.SinglyLinkedList(ScanResults).Node);
         errdefer allocator.destroy(node);
 
-        node.data = async scanPath(allocator, path_dup);
+        node.data = try ScanResults.init(allocator, root);
+        errdefer node.data.deinit();
 
         scan_results.prepend(node);
+
+        var lock = job_queue_lock.acquire();
+        defer lock.release();
+
+        var job_node = try allocator.create(JobQueue.Node);
+        errdefer allocator.destroy(job_node);
+
+        job_node.data = &node.data;
+
+        job_queue.prepend(job_node);
     }
 
     while (scan_results.popFirst()) |node| {
-        defer allocator.destroy(node);
-
-        const sr = try await node.data;
-
+        // std.debug.print("SCAN RESULTS SIZE #{d}\n", .{scan_results.len()});
         defer {
-            allocator.free(sr.path);
-
-            // The path strings themselves need to stick around to be
-            // used in future ScanResults (eventually free'd by the
-            // prior call).
-            sr.paths.deinit();
-
-            // Not so with the file variables...
-            for (sr.files.items) |f| {
-                allocator.free(f.name);
-            }
-            sr.files.deinit();
+            node.data.deinit();
+            allocator.destroy(node);
         }
+
+        const sr = &node.data;
+        sr.wait();
+
+        // std.debug.print("RUNNER: found results for {*} {s}, files={d} paths={d}\n", .{ sr, sr.path, sr.files.items.len, sr.paths.items.len });
 
         if (cfg.print_paths and scan_results.first != null) {
             try styled(cfg, writer, Style.Prefix, dropRoot(root, sr.path), "");
@@ -311,19 +342,34 @@ pub fn run(cfg: Config, _out_stream: anytype, allocator: *std.mem.Allocator, roo
         for (sr.paths.items) |path| {
             const fname = std.fs.path.basename(path);
             if (fname[0] == '.' and !cfg.include_hidden) {
-                allocator.free(path);
                 continue;
             }
 
-            errdefer allocator.free(path);
-
-            var node0 = try allocator.create(Stack.Node);
+            var node0 = try allocator.create(std.SinglyLinkedList(ScanResults).Node);
             errdefer allocator.destroy(node0);
 
-            node0.data = async scanPath(allocator, path);
+            node0.data = try ScanResults.init(allocator, path);
+            errdefer node0.data.deinit();
 
             scan_results.prepend(node0);
+
+            // std.debug.print("!!!!11111 #{d}\n", .{scan_results.len()});
+
+            var lock = job_queue_lock.acquire();
+            defer lock.release();
+
+            // std.debug.print("!!!!22222 #{d}\n", .{scan_results.len()});
+
+            var job_node = try allocator.create(JobQueue.Node);
+            errdefer allocator.destroy(job_node);
+
+            job_node.data = &node0.data;
+
+            job_queue.prepend(job_node);
+            // std.debug.print("!!!!33333 #{d}\n", .{scan_results.len()});
         }
+
+        // std.debug.print("SCAN RESULTS SIZE NOW #{d}\n", .{scan_results.len()});
 
         if (cfg.print_files) {
             for (sr.files.items) |file| {
