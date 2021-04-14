@@ -11,6 +11,7 @@ const Config = struct {
     print_paths: bool = false,
     include_hidden: bool = false,
     exts: ?[]const u8 = null,
+    no_sort: bool = false,
 
     match_pattern: ?[]const u8 = null,
     paths: [][]const u8 = undefined,
@@ -49,14 +50,15 @@ pub fn main() !void {
     try args.flagDecl("files", 'f', &cfg.print_files, null, "Print files");
     try args.flagDecl("paths", 'p', &cfg.print_paths, null, "Print paths");
     try args.flagDecl("hidden", 'H', &cfg.include_hidden, null, "Include hidden files/paths");
+    try args.flagDecl("no-sort", 'n', &cfg.no_sort, null, "Don't bother sorting the results");
     try args.flagDecl("exts", 'e', &cfg.exts, "E1[,E2...]",
         \\Comma-separated list of extensions. If specified, only
         \\files with the given extensions will be printed. Implies
         \\`--files`.
     );
 
-    var num_threads: u64 = std.math.max(2, (std.Thread.cpuCount() catch 1) / 2);
-    try args.flagDecl("num-threads", 'N', &num_threads, null, "Number of threads to use (default is cpus/2)");
+    var num_threads: u64 = 3;
+    try args.flagDecl("num-threads", null, &num_threads, null, "Number of threads to use (default is 3)");
 
     var show_usage: bool = false;
     try args.flagDecl("help", 'h', &show_usage, null, "Display this help message");
@@ -96,7 +98,7 @@ pub fn main() !void {
         cfg.print_paths = true;
     }
 
-    try startThreads(allocator, num_threads - 1);
+    try startThreads(cfg, allocator, num_threads - 1);
     try run(cfg, outs, allocator, cwd);
 }
 
@@ -221,10 +223,11 @@ const JobQueue = std.SinglyLinkedList(*ScanResults);
 var job_queue = JobQueue{};
 var job_queue_lock = std.Thread.Mutex{};
 
-fn startThreads(a: *std.mem.Allocator, num_threads: u64) !void {
+fn startThreads(cfg: Config, a: *std.mem.Allocator, num_threads: u64) !void {
     var idx: u64 = 0;
     while (idx < num_threads) : (idx += 1) {
         _ = try std.Thread.spawn(thread, .{
+            .cfg = cfg,
             .id = idx,
             .allocator = a,
         });
@@ -232,9 +235,11 @@ fn startThreads(a: *std.mem.Allocator, num_threads: u64) !void {
 }
 
 fn thread(ctx: struct {
+    cfg: Config,
     id: usize,
     allocator: *std.mem.Allocator,
 }) noreturn {
+    const cfg = ctx.cfg;
     const id = ctx.id;
 
     while (true) {
@@ -246,12 +251,12 @@ fn thread(ctx: struct {
             defer ctx.allocator.destroy(node);
 
             const sr: *ScanResults = node.data;
-            scanPath(sr) catch |err| std.debug.print("ERROR (thread={d}): {}\n", .{ id, err });
+            scanPath(cfg, sr) catch |err| std.debug.print("ERROR (thread={d}): {}\n", .{ id, err });
         }
     }
 }
 
-fn scanPath(sr: *ScanResults) !void {
+fn scanPath(cfg: Config, sr: *ScanResults) !void {
     defer sr.ready();
 
     var path = sr.path;
@@ -267,8 +272,39 @@ fn scanPath(sr: *ScanResults) !void {
     };
     defer dir.close();
 
+    var whitelisted_extensions_iterator: ?std.mem.TokenIterator = if (cfg.exts) |exts| std.mem.tokenize(exts, ",") else null;
+
     var iter = dir.iterate();
     while (try iter.next()) |p| {
+
+        // First check if this is a hidden file
+        if (p.name[0] == '.' and !cfg.include_hidden) {
+            continue;
+        }
+
+        // Next see if we have extensions we're trying to match
+        if (p.kind != .Directory) {
+            if (whitelisted_extensions_iterator) |*exts_it| {
+                defer exts_it.reset();
+
+                const file_ext = std.fs.path.extension(p.name);
+                if (file_ext.len == 0) {
+                    // No extension? Definitely not going to match anything...
+                    continue;
+                }
+
+                while (exts_it.next()) |ext| {
+                    // file_ext is always preceded by a `.` here
+                    if (std.mem.eql(u8, ext, file_ext[1..])) {
+                        break; // Found a matching extension
+                    }
+                } else {
+                    // No extensions matched, go to the next file
+                    continue;
+                }
+            }
+        }
+
         var qqq = [_][]const u8{ path, p.name };
         var joined = try std.fs.path.join(sr.allocator, qqq[0..]);
 
@@ -277,6 +313,8 @@ fn scanPath(sr: *ScanResults) !void {
             else => try files.append(Entry{ .kind = p.kind, .name = joined }),
         }
     }
+
+    if (cfg.no_sort) return;
 
     // Sort paths z-a (since we pluck them off back-to-front, above)
     _ = std.sort.sort([]const u8, paths.items, {}, strGt);
@@ -335,11 +373,6 @@ pub fn run(cfg: Config, _out_stream: anytype, allocator: *std.mem.Allocator, roo
         }
 
         for (sr.paths.items) |path| {
-            const fname = std.fs.path.basename(path);
-            if (fname[0] == '.' and !cfg.include_hidden) {
-                continue;
-            }
-
             var node0 = try allocator.create(std.SinglyLinkedList(ScanResults).Node);
             errdefer allocator.destroy(node0);
 
@@ -360,29 +393,6 @@ pub fn run(cfg: Config, _out_stream: anytype, allocator: *std.mem.Allocator, roo
 
         if (cfg.print_files) {
             for (sr.files.items) |file| {
-                if (file.name[0] == '.' and !cfg.include_hidden) continue;
-
-                if (cfg.exts) |exts| {
-                    const file_ext = std.fs.path.extension(file.name);
-                    if (file_ext.len == 0) {
-                        // No extension? Definitely not going to match anything...
-                        continue;
-                    }
-
-                    var ext_match = false;
-
-                    var it = std.mem.tokenize(exts, ",");
-                    while (it.next()) |ext| {
-                        // file_ext is always preceded by a `.` here
-                        ext_match = ext_match or std.mem.eql(u8, ext, file_ext[1..]);
-                    }
-
-                    if (!ext_match) {
-                        // None of the extensions matched, move to the next file
-                        continue;
-                    }
-                }
-
                 const str = dropRoot(root, file.name);
                 const dname = std.fs.path.dirname(str);
                 const fname = std.fs.path.basename(str);
