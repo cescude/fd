@@ -238,9 +238,59 @@ const ScanResults = struct {
     }
 };
 
-const JobQueue = std.SinglyLinkedList(*ScanResults);
+const JobQueue = SafeQueue(*ScanResults);
 var job_queue = JobQueue{};
-var job_queue_lock = std.Thread.Mutex{};
+
+fn SafeQueue(comptime T: type) type {
+    return struct {
+        unsafe: std.SinglyLinkedList(T) = std.SinglyLinkedList(T){},
+        lock: std.Thread.Mutex = std.Thread.Mutex{},
+
+        const LL = std.SinglyLinkedList(T);
+        const Self = @This();
+
+        pub const Node = LL.Node;
+
+        pub fn push(self: *Self, item: *Node) void {
+            var h = self.lock.acquire();
+            defer h.release();
+            item.next = self.unsafe.first;
+            self.unsafe.first = item;
+        }
+
+        pub fn pop(self: *Self) ?*Node {
+            var h = self.lock.acquire();
+            defer h.release();
+            if (self.unsafe.first) |first| {
+                self.unsafe.first = first.next;
+                return first;
+            }
+            return null;
+        }
+
+        // pub fn push(self: *Self, item: *LL.Node) void {
+        //     var maybe_item: ?*LL.Node = item;
+        //     while (true) {
+        //         var first = self.unsafe.first;
+        //         item.next = first;
+        //         if (@cmpxchgWeak(?*LL.Node, &self.unsafe.first, first, maybe_item, .SeqCst, .SeqCst)) |_| {
+        //             continue;
+        //         }
+        //         break;
+        //     }
+        // }
+
+        // pub fn pop(self: *Self) ?*LL.Node {
+        //     while (true) {
+        //         var first = self.unsafe.first orelse return null;
+        //         if (@cmpxchgWeak(?*LL.Node, &self.unsafe.first, first, first.next, .SeqCst, .SeqCst)) |_| {
+        //             continue;
+        //         }
+        //         return first;
+        //     }
+        // }
+    };
+}
 
 fn startThreads(cfg: Config, a: *std.mem.Allocator, num_threads: u64) !void {
     var idx: u64 = 0;
@@ -262,15 +312,11 @@ fn thread(ctx: struct {
     const id = ctx.id;
 
     while (true) {
-        var lock = job_queue_lock.acquire();
-        var maybe_node = job_queue.popFirst();
-        lock.release();
-
-        if (maybe_node) |node| {
+        if (job_queue.pop()) |node| {
             defer ctx.allocator.destroy(node);
-
-            const sr: *ScanResults = node.data;
-            scanPath(cfg, sr) catch |err| std.debug.print("ERROR (thread={d}): {}\n", .{ id, err });
+            scanPath(cfg, node.data) catch |err| {
+                std.debug.print("ERROR (thread={d}): {}\n", .{ id, err });
+            };
         }
     }
 }
@@ -302,7 +348,7 @@ fn scanPath(cfg: Config, sr: *ScanResults) !void {
         }
 
         // Next see if we have extensions we're trying to match
-        if (p.kind != .Directory) {
+        if (p.kind == .File) {
             if (whitelisted_extensions_iterator) |*exts_it| {
                 defer exts_it.reset();
 
@@ -368,10 +414,7 @@ pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *s
         errdefer allocator.destroy(job_node);
 
         job_node.data = &node.data;
-
-        var lock = job_queue_lock.acquire();
-        job_queue.prepend(job_node);
-        lock.release();
+        job_queue.push(job_node);
     }
 
     while (scan_results.popFirst()) |node| {
@@ -404,10 +447,7 @@ pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *s
             errdefer allocator.destroy(job_node);
 
             job_node.data = &node0.data;
-
-            var lock = job_queue_lock.acquire();
-            job_queue.prepend(job_node);
-            lock.release();
+            job_queue.push(job_node);
         }
 
         if (cfg.print_files) {
