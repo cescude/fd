@@ -344,7 +344,7 @@ fn scanPath(cfg: Config, sr: *ScanResults) !void {
         }
 
         // Next see if we have extensions we're trying to match
-        if (p.kind == .File) {
+        if (p.kind != .Directory) {
             if (whitelisted_extensions_iterator) |*exts_it| {
                 defer exts_it.reset();
 
