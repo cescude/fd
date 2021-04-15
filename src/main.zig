@@ -36,14 +36,11 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(!gpa.deinit());
 
+    // Need to use thread-safe allocators
     const allocator = switch (std.builtin.mode) {
         .ReleaseFast => std.heap.c_allocator,
         else => &gpa.allocator,
     };
-
-    // var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    // defer arena.deinit();
-    // const allocator = &arena.allocator;
 
     var args = Args.init(allocator);
     defer args.deinit();
@@ -155,17 +152,16 @@ fn entryGt(v: void, e0: Entry, e1: Entry) bool {
 }
 
 fn styleFor(ls_colors: LSColors, kind: Entry.Kind, mode: u64, extension: ?[]const u8) ?[]const u8 {
-    // TODO: Handle executable types?
     return switch (kind) {
         .BlockDevice => ls_colors.bd,
         .CharacterDevice => ls_colors.cd,
         .Directory => ls_colors.di,
         .NamedPipe => ls_colors.pi,
         .SymLink => ls_colors.ln,
-        .File => if (extension) |ext|
-            ls_colors.extensions.get(ext) orelse ls_colors.fi
-        else if ((mode & 1) > 0)
+        .File => if ((mode & 1) > 0)
             ls_colors.ex
+        else if (extension) |ext|
+            ls_colors.extensions.get(ext) orelse ls_colors.fi
         else
             ls_colors.fi,
         .UnixDomainSocket => ls_colors.so,
@@ -465,20 +461,18 @@ pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *s
                     continue;
                 }
 
-                if (dname) |ss| {
-                    try styled(writer, styleFor(ls_colors, .Directory, 0, null), ss, sep);
-                }
-
                 var mode: u64 = 0;
                 if (file.kind == .File) {
-                    var handle: ?std.fs.File = std.fs.openFileAbsolute(file.name, .{ .read = true }) catch null;
-                    if (handle) |h| {
-                        defer h.close();
-                        var stat = h.stat() catch null;
-                        if (stat) |st| {
+                    if (std.fs.openFileAbsolute(file.name, .{ .read = true })) |handle| {
+                        defer handle.close();
+                        if (handle.stat()) |st| {
                             mode = st.mode;
-                        }
-                    }
+                        } else |_| {}
+                    } else |_| {}
+                }
+
+                if (dname) |ss| {
+                    try styled(writer, styleFor(ls_colors, .Directory, 0, null), ss, sep);
                 }
 
                 if (ename.len > 1) {
