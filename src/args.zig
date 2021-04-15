@@ -548,8 +548,8 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
                         action_taken = Action.ContinueToNextToken;
                         value = token[2..];
                     } else if (token.len > 1) {
-                        try self.setError("Missing value for option \"{c}\"", .{flag_name}); // TODO: test case
-                        return error.ParseError;
+                        action_taken = Action.ContinueToNextToken;
+                        value = token[1..];
                     } else if (extractNextValue(remainder)) |v| {
                         action_taken = Action.SkipNextToken;
                         value = v;
