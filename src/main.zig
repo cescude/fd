@@ -107,8 +107,10 @@ pub fn main() !void {
 
     try ls_colors.parse(std.os.getenv("LS_COLORS") orelse default_colors);
 
-    try startThreads(cfg, allocator, num_threads - 1);
-    try run(cfg, outs, ls_colors, allocator, cwd);
+    var job_queue = try JobQueue.init();
+
+    try startThreads(cfg, allocator, num_threads - 1, &job_queue);
+    try run(cfg, outs, ls_colors, allocator, cwd, &job_queue);
 }
 
 const Entry = struct {
@@ -248,66 +250,86 @@ const ScanResults = struct {
 };
 
 const JobQueue = SafeQueue(*ScanResults);
-var job_queue = JobQueue{};
+
+const Semaphore = struct {
+    mutex: Mutex,
+    cond: Condition,
+    /// It is OK to initialize this field to any value.
+    permits: usize = 0,
+
+    const Self = @This();
+    const Mutex = std.Thread.Mutex;
+    const Condition = std.Thread.Condition;
+
+    pub fn wait(sem: *Self) void {
+        const held = sem.mutex.acquire();
+        defer held.release();
+
+        while (sem.permits == 0)
+            sem.cond.wait(&sem.mutex);
+
+        sem.permits -= 1;
+    }
+
+    pub fn post(sem: *Self) void {
+        const held = sem.mutex.acquire();
+        defer held.release();
+
+        sem.permits += 1;
+        sem.cond.signal();
+    }
+};
 
 fn SafeQueue(comptime T: type) type {
     return struct {
-        unsafe: std.SinglyLinkedList(T) = std.SinglyLinkedList(T){},
+        unsafe: LL = .{},
         lock: std.Thread.Mutex = std.Thread.Mutex{},
+        sem: Semaphore = undefined,
 
-        const LL = std.SinglyLinkedList(T);
+        const LL = std.TailQueue(T);
         const Self = @This();
 
         pub const Node = LL.Node;
 
+        pub fn init() !Self {
+            var self = Self{
+                .unsafe = .{},
+                .lock = .{},
+                .sem = undefined,
+            };
+            self.sem = .{
+                .mutex = .{},
+                .cond = .{},
+            };
+            return self;
+        }
+
         pub fn push(self: *Self, item: *Node) void {
             var h = self.lock.acquire();
             defer h.release();
-            item.next = self.unsafe.first;
-            self.unsafe.first = item;
+            self.unsafe.append(item);
+            self.sem.post();
         }
 
         pub fn pop(self: *Self) ?*Node {
+            self.sem.wait();
+
             var h = self.lock.acquire();
             defer h.release();
-            if (self.unsafe.first) |first| {
-                self.unsafe.first = first.next;
-                return first;
-            }
-            return null;
+
+            return self.unsafe.pop();
         }
-
-        // pub fn push(self: *Self, item: *LL.Node) void {
-        //     var maybe_item: ?*LL.Node = item;
-        //     while (true) {
-        //         var first = self.unsafe.first;
-        //         item.next = first;
-        //         if (@cmpxchgWeak(?*LL.Node, &self.unsafe.first, first, maybe_item, .Monatomic, .Monatomic)) |_| {
-        //             continue;
-        //         }
-        //         break;
-        //     }
-        // }
-
-        // pub fn pop(self: *Self) ?*LL.Node {
-        //     while (true) {
-        //         var first = self.unsafe.first orelse return null;
-        //         if (@cmpxchgWeak(?*LL.Node, &self.unsafe.first, first, first.next, .Monatomic, .Monatomic)) |_| {
-        //             continue;
-        //         }
-        //         return first;
-        //     }
-        // }
     };
 }
 
-fn startThreads(cfg: Config, a: *std.mem.Allocator, num_threads: u64) !void {
+fn startThreads(cfg: Config, a: *std.mem.Allocator, num_threads: u64, job_queue: *JobQueue) !void {
     var idx: u64 = 0;
     while (idx < num_threads) : (idx += 1) {
         _ = try std.Thread.spawn(thread, .{
             .cfg = cfg,
             .id = idx,
             .allocator = a,
+            .job_queue = job_queue,
         });
     }
 }
@@ -316,12 +338,13 @@ fn thread(ctx: struct {
     cfg: Config,
     id: usize,
     allocator: *std.mem.Allocator,
+    job_queue: *JobQueue,
 }) noreturn {
     const cfg = ctx.cfg;
     const id = ctx.id;
 
     while (true) {
-        if (job_queue.pop()) |node| {
+        if (ctx.job_queue.pop()) |node| {
             defer ctx.allocator.destroy(node);
             scanPath(cfg, node.data) catch |err| {
                 std.debug.print("ERROR (thread={d}): {}\n", .{ id, err });
@@ -425,7 +448,7 @@ fn scanPath(cfg: Config, sr: *ScanResults) !void {
     _ = std.sort.sort(Entry, files.items, {}, entryLt);
 }
 
-pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *std.mem.Allocator, root: []const u8) !void {
+pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *std.mem.Allocator, root: []const u8, job_queue: *JobQueue) !void {
     var scan_results = std.SinglyLinkedList(ScanResults){};
 
     var out_stream = _out_stream;
