@@ -204,7 +204,7 @@ pub fn dropRoot(root: []const u8, path: []const u8) []const u8 {
 }
 
 const ScanResults = struct {
-    lock: std.Thread.ResetEvent,
+    reset_event: std.Thread.ResetEvent,
     path: []const u8,
     paths: ArrayList([]const u8),
     files: ArrayList(Entry),
@@ -214,18 +214,18 @@ const ScanResults = struct {
 
     pub fn init(a: *std.mem.Allocator, p: []const u8) !Self {
         var self = Self{
-            .lock = undefined,
+            .reset_event = undefined,
             .path = try a.dupe(u8, p),
             .paths = ArrayList([]const u8).init(a),
             .files = ArrayList(Entry).init(a),
             .allocator = a,
         };
-        try self.lock.init();
+        try self.reset_event.init();
         return self;
     }
 
     pub fn deinit(self: *Self) void {
-        self.lock.deinit();
+        self.reset_event.deinit();
 
         self.allocator.free(self.path);
 
@@ -241,53 +241,27 @@ const ScanResults = struct {
     }
 
     pub fn wait(self: *Self) void {
-        self.lock.wait();
+        self.reset_event.wait();
     }
 
     pub fn ready(self: *Self) void {
-        self.lock.set();
+        self.reset_event.set();
     }
 };
 
 const JobQueue = SafeQueue(*ScanResults);
 
-const Semaphore = struct {
-    mutex: Mutex,
-    cond: Condition,
-    /// It is OK to initialize this field to any value.
-    permits: usize = 0,
-
-    const Self = @This();
-    const Mutex = std.Thread.Mutex;
-    const Condition = std.Thread.Condition;
-
-    pub fn wait(sem: *Self) void {
-        const held = sem.mutex.acquire();
-        defer held.release();
-
-        while (sem.permits == 0)
-            sem.cond.wait(&sem.mutex);
-
-        sem.permits -= 1;
-    }
-
-    pub fn post(sem: *Self) void {
-        const held = sem.mutex.acquire();
-        defer held.release();
-
-        sem.permits += 1;
-        sem.cond.signal();
-    }
-};
-
 fn SafeQueue(comptime T: type) type {
     return struct {
-        unsafe: LL = .{},
-        lock: std.Thread.Mutex = std.Thread.Mutex{},
-        sem: Semaphore = undefined,
+        unsafe: LL,
+        lock: Mutex,
+        cond: Condition,
 
         const LL = std.TailQueue(T);
         const Self = @This();
+
+        const Mutex = std.Thread.Mutex;
+        const Condition = std.Thread.Condition;
 
         pub const Node = LL.Node;
 
@@ -295,10 +269,6 @@ fn SafeQueue(comptime T: type) type {
             var self = Self{
                 .unsafe = .{},
                 .lock = .{},
-                .sem = undefined,
-            };
-            self.sem = .{
-                .mutex = .{},
                 .cond = .{},
             };
             return self;
@@ -307,15 +277,17 @@ fn SafeQueue(comptime T: type) type {
         pub fn push(self: *Self, item: *Node) void {
             var h = self.lock.acquire();
             defer h.release();
+
             self.unsafe.append(item);
-            self.sem.post();
+            self.cond.signal();
         }
 
         pub fn pop(self: *Self) ?*Node {
-            self.sem.wait();
-
             var h = self.lock.acquire();
             defer h.release();
+
+            while (self.unsafe.len == 0)
+                self.cond.wait(&self.lock);
 
             return self.unsafe.pop();
         }
