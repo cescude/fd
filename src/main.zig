@@ -25,7 +25,7 @@ const Config = struct {
 };
 
 pub fn main() !void {
-    var buffer: [4096]u8 = undefined;
+    var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     var cwd = try std.os.getcwd(buffer[0..]);
 
     var cfg = Config{};
@@ -111,7 +111,14 @@ pub fn main() !void {
     try run(cfg, outs, ls_colors, allocator, cwd);
 }
 
-const Entry = std.fs.Dir.Entry;
+const Entry = struct {
+    name: []const u8,
+    kind: Kind,
+    is_executable: bool = false,
+    bad_symlink: bool = false,
+
+    pub const Kind = std.fs.File.Kind;
+};
 
 fn strLt(v: void, s0: []const u8, s1: []const u8) bool {
     var idx: usize = 0;
@@ -151,14 +158,14 @@ fn entryGt(v: void, e0: Entry, e1: Entry) bool {
     return strGt(v, e0.name, e1.name);
 }
 
-fn styleFor(ls_colors: LSColors, kind: Entry.Kind, mode: u64, extension: ?[]const u8) ?[]const u8 {
+fn styleFor(ls_colors: LSColors, kind: Entry.Kind, is_executable: bool, bad_symlink: bool, extension: ?[]const u8) ?[]const u8 {
     return switch (kind) {
         .BlockDevice => ls_colors.bd,
         .CharacterDevice => ls_colors.cd,
         .Directory => ls_colors.di,
         .NamedPipe => ls_colors.pi,
-        .SymLink => ls_colors.ln,
-        .File => if ((mode & 1) > 0)
+        .SymLink => if (bad_symlink) ls_colors.mi else ls_colors.ln,
+        .File => if (is_executable)
             ls_colors.ex
         else if (extension) |ext|
             ls_colors.extensions.get(ext) orelse ls_colors.fi
@@ -170,11 +177,17 @@ fn styleFor(ls_colors: LSColors, kind: Entry.Kind, mode: u64, extension: ?[]cons
     };
 }
 
-fn styled(writer: anytype, _style: ?[]const u8, str: []const u8, comptime suffix: []const u8) !void {
+fn styled(writer: anytype, _style: ?[]const u8, strs: anytype) !void {
     if (_style) |style| {
-        try writer.print("\u{001b}[{s}m{s}{s}\u{001b}[0m", .{ style, str, suffix });
+        try writer.print("\u{001b}[{s}m", .{style});
+        inline for (std.meta.fields(@TypeOf(strs))) |field| {
+            try writer.print("{s}", .{@field(strs, field.name)});
+        }
+        try writer.print("\u{001b}[0m", .{});
     } else {
-        try writer.print("{s}{s}", .{ str, suffix });
+        inline for (std.meta.fields(@TypeOf(strs))) |field| {
+            try writer.print("{s}", .{@field(strs, field.name)});
+        }
     }
 }
 
@@ -269,7 +282,7 @@ fn SafeQueue(comptime T: type) type {
         //     while (true) {
         //         var first = self.unsafe.first;
         //         item.next = first;
-        //         if (@cmpxchgWeak(?*LL.Node, &self.unsafe.first, first, maybe_item, .SeqCst, .SeqCst)) |_| {
+        //         if (@cmpxchgWeak(?*LL.Node, &self.unsafe.first, first, maybe_item, .Monatomic, .Monatomic)) |_| {
         //             continue;
         //         }
         //         break;
@@ -279,7 +292,7 @@ fn SafeQueue(comptime T: type) type {
         // pub fn pop(self: *Self) ?*LL.Node {
         //     while (true) {
         //         var first = self.unsafe.first orelse return null;
-        //         if (@cmpxchgWeak(?*LL.Node, &self.unsafe.first, first, first.next, .SeqCst, .SeqCst)) |_| {
+        //         if (@cmpxchgWeak(?*LL.Node, &self.unsafe.first, first, first.next, .Monatomic, .Monatomic)) |_| {
         //             continue;
         //         }
         //         return first;
@@ -318,6 +331,8 @@ fn thread(ctx: struct {
 }
 
 fn scanPath(cfg: Config, sr: *ScanResults) !void {
+    var symlink_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+
     defer sr.ready();
 
     var path = sr.path;
@@ -371,7 +386,33 @@ fn scanPath(cfg: Config, sr: *ScanResults) !void {
 
         switch (p.kind) {
             .Directory => try paths.append(joined),
-            else => try files.append(Entry{ .kind = p.kind, .name = joined }),
+            else => try files.append(Entry{
+                .kind = p.kind,
+                .name = joined,
+                .is_executable = brk: {
+                    if (p.kind == .File) {
+                        if (dir.openFile(p.name, .{ .read = true })) |handle| {
+                            defer handle.close();
+                            if (handle.stat()) |st| {
+                                break :brk (st.mode & 0o111) != 0;
+                            } else |_| {}
+                        } else |_| {}
+                    }
+                    break :brk false;
+                },
+                .bad_symlink = brk: {
+                    if (p.kind == .SymLink) {
+                        var symlink_name = dir.readLink(p.name, symlink_buffer[0..]) catch |_| {
+                            break :brk true;
+                        };
+
+                        dir.access(symlink_name, .{ .read = true }) catch |err| {
+                            break :brk true;
+                        };
+                    }
+                    break :brk false;
+                },
+            }),
         }
     }
 
@@ -425,7 +466,7 @@ pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *s
         var needs_flush = false;
 
         if (cfg.print_paths and scan_results.first != null) {
-            try styled(writer, if (cfg.use_color == .On) styleFor(ls_colors, .Directory, 0, null) else null, dropRoot(root, sr.path), "");
+            try styled(writer, if (cfg.use_color == .On) styleFor(ls_colors, .Directory, false, false, null) else null, .{dropRoot(root, sr.path)});
             try writer.print("\n", .{});
             needs_flush = true;
         }
@@ -461,25 +502,17 @@ pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *s
                     continue;
                 }
 
-                var mode: u64 = 0;
-                if (file.kind == .File) {
-                    if (std.fs.openFileAbsolute(file.name, .{ .read = true })) |handle| {
-                        defer handle.close();
-                        if (handle.stat()) |st| {
-                            mode = st.mode;
-                        } else |_| {}
-                    } else |_| {}
-                }
-
                 if (dname) |ss| {
-                    try styled(writer, styleFor(ls_colors, .Directory, 0, null), ss, sep);
+                    try styled(writer, styleFor(ls_colors, .Directory, false, false, null), .{ ss, sep });
                 }
 
                 if (ename.len > 1) {
-                    try styled(writer, styleFor(ls_colors, file.kind, mode, ename[1..]), fname, "\n");
+                    try styled(writer, styleFor(ls_colors, file.kind, file.is_executable, file.bad_symlink, ename[1..]), .{fname});
                 } else {
-                    try styled(writer, styleFor(ls_colors, file.kind, mode, null), fname, "\n");
+                    try styled(writer, styleFor(ls_colors, file.kind, file.is_executable, file.bad_symlink, null), .{fname});
                 }
+
+                try writer.print("\n", .{});
             }
 
             needs_flush = sr.files.items.len > 0;
