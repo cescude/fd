@@ -255,7 +255,7 @@ pub fn CmdArgs(comptime CommandEnumT: type) type {
             try self.flagDecl(long_name, short_name, ptr, null, "");
         }
 
-        pub fn flagDecl(self: *Self, comptime long_name: ?[]const u8, comptime short_name: ?u8, ptr: anytype, comptime val_desc: ?[]const u8, comptime description: []const u8) !void {
+        pub fn flagDecl(self: *Self, comptime long_name: ?[]const u8, comptime short_name: ?u8, ptr: anytype, val_desc: ?[]const u8, description: []const u8) !void {
             if (long_name == null and short_name == null) {
                 @compileError("Must provide at least one name to identify this flag");
             }

@@ -61,8 +61,10 @@ pub fn main() !void {
         \\`--files`.
     );
 
-    var num_threads: u64 = 3;
-    try args.flagDecl("num-threads", 'N', &num_threads, null, "Number of threads to use (default is 3)");
+    var num_threads: u64 = std.Thread.cpuCount() catch 1;
+    var num_threads_desc = try std.fmt.allocPrint(allocator, "Number of threads to use (default is {d})", .{num_threads});
+    defer allocator.free(num_threads_desc);
+    try args.flagDecl("num-threads", 'N', &num_threads, null, num_threads_desc);
 
     var show_usage: bool = false;
     try args.flagDecl("help", 'h', &show_usage, null, "Display this help message");
@@ -107,10 +109,14 @@ pub fn main() !void {
 
     try ls_colors.parse(std.os.getenv("LS_COLORS") orelse default_colors);
 
-    var job_queue = try JobQueue.init();
+    if (num_threads < 2) {
+        try run(cfg, outs, ls_colors, allocator, cwd, null);
+    } else {
+        var job_queue = try JobQueue.init();
 
-    try startThreads(cfg, allocator, num_threads - 1, &job_queue);
-    try run(cfg, outs, ls_colors, allocator, cwd, &job_queue);
+        try startWorkers(cfg, allocator, num_threads - 1, &job_queue);
+        try run(cfg, outs, ls_colors, allocator, cwd, &job_queue);
+    }
 }
 
 const Entry = struct {
@@ -299,7 +305,7 @@ fn SafeQueue(comptime T: type) type {
     };
 }
 
-fn startThreads(cfg: Config, a: *std.mem.Allocator, num_threads: u64, job_queue: *JobQueue) !void {
+fn startWorkers(cfg: Config, a: *std.mem.Allocator, num_threads: u64, job_queue: *JobQueue) !void {
     var idx: u64 = 0;
     while (idx < num_threads) : (idx += 1) {
         _ = try std.Thread.spawn(thread, .{
@@ -425,8 +431,10 @@ fn scanPath(cfg: Config, sr: *ScanResults) !void {
     _ = std.sort.sort(Entry, files.items, {}, entryLt);
 }
 
-pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *std.mem.Allocator, root: []const u8, job_queue: *JobQueue) !void {
+pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *std.mem.Allocator, root: []const u8, job_queue: ?*JobQueue) !void {
     var scan_results = std.SinglyLinkedList(ScanResults){};
+
+    var no_workers = job_queue == null;
 
     var out_stream = _out_stream;
     var writer = out_stream.writer();
@@ -447,11 +455,15 @@ pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *s
 
         scan_results.prepend(node);
 
-        var job_node = try allocator.create(JobQueue.Node);
-        errdefer allocator.destroy(job_node);
+        if (no_workers) {
+            try scanPath(cfg, &node.data);
+        } else {
+            var job_node = try allocator.create(JobQueue.Node);
+            errdefer allocator.destroy(job_node);
 
-        job_node.data = &node.data;
-        job_queue.push(job_node);
+            job_node.data = &node.data;
+            job_queue.?.push(job_node);
+        }
     }
 
     while (scan_results.popFirst()) |node| {
@@ -480,11 +492,15 @@ pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *s
 
             scan_results.prepend(node0);
 
-            var job_node = try allocator.create(JobQueue.Node);
-            errdefer allocator.destroy(job_node);
+            if (no_workers) {
+                try scanPath(cfg, &node0.data);
+            } else {
+                var job_node = try allocator.create(JobQueue.Node);
+                errdefer allocator.destroy(job_node);
 
-            job_node.data = &node0.data;
-            job_queue.push(job_node);
+                job_node.data = &node0.data;
+                job_queue.?.push(job_node);
+            }
         }
 
         if (cfg.print_files) {
