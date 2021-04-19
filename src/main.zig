@@ -260,8 +260,13 @@ fn SafeQueue(comptime T: type) type {
         const LL = std.TailQueue(T);
         const Self = @This();
 
-        const Mutex = std.Thread.Mutex;
-        const Condition = std.Thread.Condition;
+        // const Mutex = std.Thread.Mutex;
+        // const Condition = std.Thread.Condition;
+
+        // NOTE: The stdlib version Condition implementation is broken, so copy
+        // out & use our own.
+        const Mutex = @import("Mutex.zig");
+        const Condition = @import("Condition.zig");
 
         pub const Node = LL.Node;
 
@@ -287,7 +292,7 @@ fn SafeQueue(comptime T: type) type {
             defer h.release();
 
             while (self.unsafe.len == 0)
-                self.cond.wait(&self.lock);
+                self.cond.wait(&h);
 
             return self.unsafe.pop();
         }
