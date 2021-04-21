@@ -397,11 +397,8 @@ fn scanPath(cfg: Config, sr: *ScanResults) !void {
                 .name = joined,
                 .is_executable = brk: {
                     if (p.kind == .File) {
-                        if (dir.openFile(p.name, .{ .read = true })) |handle| {
-                            defer handle.close();
-                            if (handle.stat()) |st| {
-                                break :brk (st.mode & 0o111) != 0;
-                            } else |_| {}
+                        if (stat(joined)) |info| {
+                            break :brk (info.mode & 0o111) != 0;
                         } else |_| {}
                     }
                     break :brk false;
@@ -429,6 +426,27 @@ fn scanPath(cfg: Config, sr: *ScanResults) !void {
 
     // Sort files a-z (since we iterate over them normally)
     _ = std.sort.sort(Entry, files.items, {}, entryLt);
+}
+
+fn stat(abs_path: []const u8) !if (std.builtin.link_libc) std.os.Stat else std.fs.File.Stat {
+
+    // zig stdlib doesn't have an "absolute path" stat function, so when libc
+    // isn't available, just open the file & use fstat.
+
+    if (std.builtin.link_libc) {
+        var info: std.os.Stat = undefined;
+        var posix_path: [*:0]const u8 = &try std.os.toPosixPath(abs_path);
+        if (std.c.stat(posix_path, &info) == 0) {
+            return info;
+        }
+    } else if (std.fs.openFileAbsolute(abs_path, .{ .read = true })) |handle| {
+        defer handle.close();
+        if (handle.stat()) |info| {
+            return info;
+        } else |_| {}
+    } else |_| {}
+
+    return error.CantStat; // I'm sure there's a better, preeixsting one
 }
 
 pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *std.mem.Allocator, root: []const u8, job_queue: ?*JobQueue) !void {
