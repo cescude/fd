@@ -14,6 +14,10 @@ pub fn build(b: *std.build.Builder) void {
     const exe = b.addExecutable("fd", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
+    exe.addPackage(.{
+        .name = "zopts",
+        .path = "lib/zopts/src/zopts.zig",
+    });
     switch (mode) {
         .ReleaseFast => exe.linkSystemLibrary("c"), // needed for the c_allocator
         else => {},

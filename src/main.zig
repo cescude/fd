@@ -1,7 +1,7 @@
 // TODO: print a reset character before exiting
 // TODO: install a signal handler to reset & flush?
 const std = @import("std");
-const Args = @import("args.zig").Args;
+const ZOpts = @import("zopts");
 const LSColors = @import("ls_colors.zig");
 const ArrayList = std.ArrayList;
 
@@ -42,7 +42,7 @@ pub fn main() !void {
         else => &gpa.allocator,
     };
 
-    var args = Args.init(allocator);
+    var args = ZOpts.init(allocator);
     defer args.deinit();
 
     args.summary(
@@ -50,12 +50,12 @@ pub fn main() !void {
         \\or find (although, to be fair, it does much, much less).
     );
 
-    try args.flagDecl("color", 'c', &cfg.use_color, null, "Enable use of color (default is Auto)");
-    try args.flagDecl("files", 'f', &cfg.print_files, null, "Print files");
-    try args.flagDecl("paths", 'p', &cfg.print_paths, null, "Print paths");
-    try args.flagDecl("hidden", 'H', &cfg.include_hidden, null, "Include hidden files/paths");
-    try args.flagDecl("no-sort", 'n', &cfg.no_sort, null, "Don't bother sorting the results");
-    try args.flagDecl("exts", 'e', &cfg.exts, "E1[,E2...]",
+    try args.flagDecl(&cfg.use_color, "color", 'c', null, "Enable use of color (default is Auto)");
+    try args.flagDecl(&cfg.print_files, "files", 'f', null, "Print files");
+    try args.flagDecl(&cfg.print_paths, "paths", 'p', null, "Print paths");
+    try args.flagDecl(&cfg.include_hidden, "hidden", 'H', null, "Include hidden files/paths");
+    try args.flagDecl(&cfg.no_sort, "no-sort", 'n', null, "Don't bother sorting the results");
+    try args.flagDecl(&cfg.exts, "exts", 'e', "E1[,E2...]",
         \\Comma-separated list of extensions. If specified, only
         \\files with the given extensions will be printed. Implies
         \\`--files`.
@@ -64,17 +64,17 @@ pub fn main() !void {
     var num_threads: u64 = std.Thread.cpuCount() catch 1;
     var num_threads_desc = try std.fmt.allocPrint(allocator, "Number of threads to use (default is {d})", .{num_threads});
     defer allocator.free(num_threads_desc);
-    try args.flagDecl("num-threads", 'N', &num_threads, null, num_threads_desc);
+    try args.flagDecl(&num_threads, "num-threads", 'N', null, num_threads_desc);
 
     var show_usage: bool = false;
-    try args.flagDecl("help", 'h', &show_usage, null, "Display this help message");
+    try args.flagDecl(&show_usage, "help", 'h', null, "Display this help message");
 
-    try args.argDecl("[PATTERN]", &cfg.match_pattern, "Only print files whose name matches this pattern.");
-    try args.extraDecl("[PATH]", &cfg.paths,
+    try args.argDecl(&cfg.match_pattern, "PATTERN", "Only print files whose name matches this pattern.");
+    try args.extraDecl(&cfg.paths, "[PATH]",
         \\List files in the provided paths (default is the current working directory)
     );
 
-    args.parse() catch args.printUsageAndDie();
+    args.parseOrDie();
 
     if (cfg.match_pattern) |pat| {
         std.debug.print("PATTERN: {s}\n", .{pat});
@@ -85,7 +85,7 @@ pub fn main() !void {
     }
 
     if (show_usage) {
-        args.printUsageAndDie();
+        args.printHelpAndDie();
     }
 
     // If `use_color` is .Auto, use isatty to handle the change

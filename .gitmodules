@@ -1,0 +1,3 @@
+[submodule "lib/zopts"]
+	path = lib/zopts
+	url = git@github.com:cescude/zopts.git
