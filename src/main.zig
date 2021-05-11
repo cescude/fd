@@ -109,14 +109,7 @@ pub fn main() !void {
 
     try ls_colors.parse(std.os.getenv("LS_COLORS") orelse default_colors);
 
-    if (num_threads < 2) {
-        try run(cfg, outs, ls_colors, allocator, cwd, null);
-    } else {
-        var job_queue = try JobQueue.init();
-
-        try startWorkers(cfg, allocator, num_threads - 1, &job_queue);
-        try run(cfg, outs, ls_colors, allocator, cwd, &job_queue);
-    }
+    try run(cfg, outs, ls_colors, allocator, cwd);
 }
 
 const Entry = struct {
@@ -210,29 +203,27 @@ pub fn dropRoot(root: []const u8, path: []const u8) []const u8 {
 }
 
 const ScanResults = struct {
-    reset_event: std.Thread.ResetEvent,
     path: []const u8,
     paths: ArrayList([]const u8),
     files: ArrayList(Entry),
+    worker: *std.Thread,
     allocator: *std.mem.Allocator,
 
     const Self = @This();
 
     pub fn init(a: *std.mem.Allocator, p: []const u8) !Self {
         var self = Self{
-            .reset_event = undefined,
+            .worker = undefined,
             .path = try a.dupe(u8, p),
             .paths = ArrayList([]const u8).init(a),
             .files = ArrayList(Entry).init(a),
             .allocator = a,
         };
-        try self.reset_event.init();
+
         return self;
     }
 
     pub fn deinit(self: *Self) void {
-        self.reset_event.deinit();
-
         self.allocator.free(self.path);
 
         for (self.paths.items) |path| {
@@ -246,100 +237,26 @@ const ScanResults = struct {
         self.files.deinit();
     }
 
-    pub fn wait(self: *Self) void {
-        self.reset_event.wait();
+    pub fn run(self: *Self, cfg: Config) !void {
+        self.worker = try std.Thread.spawn(worker, .{
+            .cfg = cfg,
+            .sr = self,
+        });
     }
 
-    pub fn ready(self: *Self) void {
-        self.reset_event.set();
+    pub fn wait(self: *Self) void {
+        self.worker.wait();
     }
 };
 
-const JobQueue = SafeQueue(*ScanResults);
-
-fn SafeQueue(comptime T: type) type {
-    return struct {
-        unsafe: LL,
-        lock: Mutex,
-        cond: Condition,
-
-        const LL = std.TailQueue(T);
-        const Self = @This();
-
-        // const Mutex = std.Thread.Mutex;
-        // const Condition = std.Thread.Condition;
-
-        // NOTE: The stdlib version Condition implementation is broken, so copy
-        // out & use our own.
-        const Mutex = @import("Mutex.zig");
-        const Condition = @import("Condition.zig");
-
-        pub const Node = LL.Node;
-
-        pub fn init() !Self {
-            var self = Self{
-                .unsafe = .{},
-                .lock = .{},
-                .cond = .{},
-            };
-            return self;
-        }
-
-        pub fn push(self: *Self, item: *Node) void {
-            var h = self.lock.acquire();
-            defer h.release();
-
-            self.unsafe.append(item);
-            self.cond.signal();
-        }
-
-        pub fn pop(self: *Self) ?*Node {
-            var h = self.lock.acquire();
-            defer h.release();
-
-            while (self.unsafe.len == 0)
-                self.cond.wait(&h);
-
-            return self.unsafe.pop();
-        }
-    };
-}
-
-fn startWorkers(cfg: Config, a: *std.mem.Allocator, num_threads: u64, job_queue: *JobQueue) !void {
-    var idx: u64 = 0;
-    while (idx < num_threads) : (idx += 1) {
-        _ = try std.Thread.spawn(thread, .{
-            .cfg = cfg,
-            .id = idx,
-            .allocator = a,
-            .job_queue = job_queue,
-        });
-    }
-}
-
-fn thread(ctx: struct {
+fn worker(ctx: struct {
     cfg: Config,
-    id: usize,
-    allocator: *std.mem.Allocator,
-    job_queue: *JobQueue,
-}) noreturn {
-    const cfg = ctx.cfg;
-    const id = ctx.id;
+    sr: *ScanResults,
+}) !void {
+    var cfg = ctx.cfg;
+    var sr = ctx.sr;
 
-    while (true) {
-        if (ctx.job_queue.pop()) |node| {
-            defer ctx.allocator.destroy(node);
-            scanPath(cfg, node.data) catch |err| {
-                std.debug.print("ERROR (thread={d}): {}\n", .{ id, err });
-            };
-        }
-    }
-}
-
-fn scanPath(cfg: Config, sr: *ScanResults) !void {
     var symlink_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-
-    defer sr.ready();
 
     var path = sr.path;
     var paths = &sr.paths;
@@ -449,10 +366,8 @@ fn stat(abs_path: []const u8) !if (std.builtin.link_libc) std.os.Stat else std.f
     return error.CantStat; // I'm sure there's a better, preeixsting one
 }
 
-pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *std.mem.Allocator, root: []const u8, job_queue: ?*JobQueue) !void {
+pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *std.mem.Allocator, root: []const u8) !void {
     var scan_results = std.SinglyLinkedList(ScanResults){};
-
-    var no_workers = job_queue == null;
 
     var out_stream = _out_stream;
     var writer = out_stream.writer();
@@ -471,17 +386,9 @@ pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *s
         node.data = try ScanResults.init(allocator, root);
         errdefer node.data.deinit();
 
+        try node.data.run(cfg);
+
         scan_results.prepend(node);
-
-        if (no_workers) {
-            try scanPath(cfg, &node.data);
-        } else {
-            var job_node = try allocator.create(JobQueue.Node);
-            errdefer allocator.destroy(job_node);
-
-            job_node.data = &node.data;
-            job_queue.?.push(job_node);
-        }
     }
 
     while (scan_results.popFirst()) |node| {
@@ -508,17 +415,9 @@ pub fn run(cfg: Config, _out_stream: anytype, ls_colors: LSColors, allocator: *s
             node0.data = try ScanResults.init(allocator, path);
             errdefer node0.data.deinit();
 
+            try node0.data.run(cfg);
+
             scan_results.prepend(node0);
-
-            if (no_workers) {
-                try scanPath(cfg, &node0.data);
-            } else {
-                var job_node = try allocator.create(JobQueue.Node);
-                errdefer allocator.destroy(job_node);
-
-                job_node.data = &node0.data;
-                job_queue.?.push(job_node);
-            }
         }
 
         if (cfg.print_files) {
